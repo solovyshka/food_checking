@@ -1,0 +1,15 @@
+[Unit]
+Description=Food Checking API
+After=network.target postgresql.service food-whisper.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/food_checking
+EnvironmentFile=/opt/food_checking/.env
+ExecStart=/opt/food_checking/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8088
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
