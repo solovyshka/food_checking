@@ -57,6 +57,19 @@ systemctl status food-whisper food-api food-bot
 - `POST /api/inventory/{batch_id}/confirm`
 - `POST /api/inventory/{batch_id}/cancel`
 
+## Секреты
+
+Реальные `.env` **не в git**. Хранятся на закрытом сервере в `/opt/secrets/<project>/.env`.
+
+```bash
+./deploy/secrets/bootstrap-server.sh   # один раз создать vault
+./deploy/secrets/bypass-vpn.sh         # SSH мимо VPN (HideMyName)
+./deploy/secrets/pull.sh food_checking # новое устройство
+./deploy/secrets/push.sh food_checking # сохранить изменения в vault
+```
+
+Подробнее: [docs/secrets.md](docs/secrets.md)
+
 ## План
 
 См. [PLAN.md](PLAN.md)
