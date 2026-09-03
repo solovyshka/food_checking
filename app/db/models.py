@@ -16,6 +16,7 @@ class Product(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     name_normalized: Mapped[str] = mapped_column(String(255), nullable=False)
+    unit: Mapped[str] = mapped_column(String(32), nullable=False)
 
     inventory_entries: Mapped[list["InventoryEntry"]] = relationship(back_populates="product")
     consumption_entries: Mapped[list["ConsumptionEntry"]] = relationship(back_populates="product")

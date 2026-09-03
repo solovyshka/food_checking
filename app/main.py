@@ -53,6 +53,9 @@ async def voice_process(
             }
             for row in batch.rows
         ],
+        "unknown_names": batch.unknown_names,
+        "missing_quantity": batch.missing_quantity,
+        "skipped": batch.skipped,
     }
 
 

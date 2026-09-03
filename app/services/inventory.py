@@ -8,9 +8,9 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
-from app.config import get_settings
+from app.catalog.products import CatalogProduct, lookup_product
 from app.db.models import InventoryEntry, Product
-from app.services.parser import ParsedInventory, ParsedItem
+from app.services.parser import ParsedInventory
 
 MOSCOW = ZoneInfo("Europe/Moscow")
 
@@ -20,12 +20,15 @@ def normalize_name(name: str) -> str:
     return cleaned
 
 
-def get_or_create_product(db: Session, name: str) -> Product:
-    normalized = normalize_name(name)
+def get_or_create_product(db: Session, catalog: CatalogProduct) -> Product:
+    normalized = normalize_name(catalog.name)
     product = db.scalar(select(Product).where(Product.name_normalized == normalized))
     if product:
+        if product.unit != catalog.unit or product.name != catalog.name:
+            product.unit = catalog.unit
+            product.name = catalog.name
         return product
-    product = Product(name=name.strip(), name_normalized=normalized)
+    product = Product(name=catalog.name, name_normalized=normalized, unit=catalog.unit)
     db.add(product)
     db.flush()
     return product
@@ -49,6 +52,9 @@ class PendingBatch:
     recorded_at: datetime
     entry_date: date
     rows: list[InventoryRow]
+    unknown_names: list[str]
+    missing_quantity: list[str]
+    skipped: list[str]
 
 
 def create_pending_entries(
@@ -62,13 +68,23 @@ def create_pending_entries(
     entry_date = parsed.entry_date or now.date()
     batch_id = str(uuid.uuid4())
     rows: list[InventoryRow] = []
+    unknown_names: list[str] = []
+    missing_quantity: list[str] = []
+    skipped = list(parsed.skipped)
 
     for item in parsed.items:
-        product = get_or_create_product(db, item.name)
+        if item.quantity is None:
+            missing_quantity.append(item.name)
+            continue
+        catalog = lookup_product(item.name)
+        if catalog is None:
+            unknown_names.append(item.name)
+            continue
+        product = get_or_create_product(db, catalog)
         entry = InventoryEntry(
             product_id=product.id,
             quantity=item.quantity,
-            unit=item.unit,
+            unit=product.unit,
             status="pending",
             source="voice",
             transcript=transcript,
@@ -91,6 +107,23 @@ def create_pending_entries(
             )
         )
 
+    problems = unknown_names or missing_quantity or skipped
+    if not rows and not problems:
+        skipped.append("ничего не распознано в тексте")
+        problems = True
+    if not rows:
+        db.rollback()
+        return PendingBatch(
+            batch_id="",
+            transcript=transcript,
+            recorded_at=now,
+            entry_date=entry_date,
+            rows=[],
+            unknown_names=unknown_names,
+            missing_quantity=missing_quantity,
+            skipped=skipped,
+        )
+
     db.commit()
     return PendingBatch(
         batch_id=batch_id,
@@ -98,6 +131,9 @@ def create_pending_entries(
         recorded_at=now,
         entry_date=entry_date,
         rows=rows,
+        unknown_names=unknown_names,
+        missing_quantity=missing_quantity,
+        skipped=skipped,
     )
 
 
@@ -151,16 +187,28 @@ def list_inventory(db: Session, status: str | None = "confirmed") -> list[Invent
 
 def format_pending_table(batch: PendingBatch) -> str:
     recorded = batch.recorded_at.astimezone(MOSCOW).strftime("%d.%m.%Y %H:%M")
-    lines = [
-        f"Дата: {recorded}",
-        "```",
-        f"{'Продукт':<16} {'Кол-во':>8} {'Ед.':<8}",
-        "-" * 36,
-    ]
-    for row in batch.rows:
-        qty = format(row.quantity.normalize(), "f")
-        lines.append(f"{row.product_name[:16]:<16} {qty:>8} {row.unit:<8}")
-    lines.append("```")
+    lines = [f"Дата: {recorded}"]
+    if batch.rows:
+        lines.extend(
+            [
+                "```",
+                f"{'Продукт':<16} {'Кол-во':>8} {'Ед.':<12}",
+                "-" * 40,
+            ]
+        )
+        for row in batch.rows:
+            qty = format(row.quantity.normalize(), "f")
+            lines.append(f"{row.product_name[:16]:<16} {qty:>8} {row.unit:<12}")
+        lines.append("```")
+    if batch.unknown_names:
+        names = ", ".join(batch.unknown_names)
+        lines.append(f"Нет в справочнике (не сохранено): {names}")
+    if batch.missing_quantity:
+        names = ", ".join(batch.missing_quantity)
+        lines.append(f"Не понял количество (не сохранено): {names}")
+    if batch.skipped:
+        names = ", ".join(batch.skipped)
+        lines.append(f"Не разобрал: {names}")
     lines.append(f"Транскрипт: «{batch.transcript}»")
     return "\n".join(lines)
 
