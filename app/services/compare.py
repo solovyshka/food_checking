@@ -1,10 +1,11 @@
-"""Side-by-side local vs OpenAI food-diary comparison — never writes to DB."""
+"""Side-by-side local vs OpenAI comparison — never writes to DB."""
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from app.config import get_settings
@@ -15,7 +16,11 @@ from app.services.food_diary import (
 )
 from app.services.hideme_vpn import openai_vpn_session
 from app.services.inventory import PendingBatch, preview_parsed
-from app.services.parser import ParseError, parse_inventory_text
+from app.services.parser import (
+    ParseError,
+    parse_inventory_text,
+    parse_inventory_text_openai,
+)
 from app.services.transcription import (
     TranscriptionError,
     transcribe_audio,
@@ -24,13 +29,17 @@ from app.services.transcription import (
 
 MOSCOW = ZoneInfo("Europe/Moscow")
 
+CompareKind = Literal["inventory", "consumption"]
+
 
 @dataclass
 class CompareResult:
+    kind: CompareKind
     local_stt: str
     openai_stt: str | None
     openai_stt_error: str | None
     local_preview: PendingBatch
+    openai_preview: PendingBatch | None
     food_diary: FoodDiaryResult | None
     openai_parse_error: str | None
     recorded_at: datetime
@@ -58,8 +67,13 @@ def _format_preview_block(title: str, batch: PendingBatch) -> list[str]:
 
 
 def format_compare_message(result: CompareResult) -> str:
+    title = (
+        "Сравнение *наличия*"
+        if result.kind == "inventory"
+        else "Сравнение *съел* (дневник)"
+    )
     lines = [
-        "Сравнение (в БД *не* пишем)",
+        f"{title} (в БД *не* пишем)",
         "",
         f"STT local: «{result.local_stt}»",
     ]
@@ -71,16 +85,39 @@ def format_compare_message(result: CompareResult) -> str:
     lines.append("")
     lines.extend(_format_preview_block("Парсер local (Ollama)", result.local_preview))
     lines.append("")
-    if result.food_diary is not None:
-        lines.append(format_food_diary(result.food_diary))
+
+    if result.kind == "inventory":
+        if result.openai_preview is not None:
+            lines.extend(
+                _format_preview_block("Парсер OpenAI (наличие)", result.openai_preview)
+            )
+        else:
+            err = result.openai_parse_error or "нет результата"
+            lines.append(f"*Парсер OpenAI (наличие)*\n_{err}_")
     else:
-        err = result.openai_parse_error or "нет результата"
-        lines.append(f"*Дневник OpenAI*\n_{err}_")
+        if result.food_diary is not None:
+            lines.append(format_food_diary(result.food_diary))
+        else:
+            err = result.openai_parse_error or "нет результата"
+            lines.append(f"*Дневник OpenAI*\n_{err}_")
 
     text = "\n".join(lines)
     if len(text) > 3900:
         return text[:3900] + "\n…(обрезано)"
     return text
+
+
+async def _run_openai_inventory(
+    transcript: str,
+) -> tuple[PendingBatch | None, str | None]:
+    settings = get_settings()
+    if not settings.has_openai:
+        return None, "OPENAI_API_KEY не задан"
+    try:
+        parsed = await parse_inventory_text_openai(transcript)
+        return preview_parsed(parsed, transcript, kind="inventory"), None
+    except ParseError as exc:
+        return None, str(exc)
 
 
 async def _run_openai_diary(transcript: str) -> tuple[FoodDiaryResult | None, str | None]:
@@ -93,21 +130,36 @@ async def _run_openai_diary(transcript: str) -> tuple[FoodDiaryResult | None, st
         return None, str(exc)
 
 
-async def compare_from_text(text: str) -> CompareResult:
+async def compare_from_text(
+    text: str,
+    kind: CompareKind = "consumption",
+) -> CompareResult:
     recorded_at = datetime.now(MOSCOW)
     transcript = text.strip()
+    preview_kind = "inventory" if kind == "inventory" else "consumption"
 
     local_parsed = await parse_inventory_text(transcript)
-    local_preview = preview_parsed(local_parsed, transcript, recorded_at=recorded_at)
+    local_preview = preview_parsed(
+        local_parsed, transcript, kind=preview_kind, recorded_at=recorded_at
+    )
+
+    openai_preview: PendingBatch | None = None
+    food_diary: FoodDiaryResult | None = None
+    openai_parse_error: str | None = None
 
     async with openai_vpn_session():
-        food_diary, openai_parse_error = await _run_openai_diary(transcript)
+        if kind == "inventory":
+            openai_preview, openai_parse_error = await _run_openai_inventory(transcript)
+        else:
+            food_diary, openai_parse_error = await _run_openai_diary(transcript)
 
     return CompareResult(
+        kind=kind,
         local_stt=transcript,
         openai_stt=None,
         openai_stt_error=None,
         local_preview=local_preview,
+        openai_preview=openai_preview,
         food_diary=food_diary,
         openai_parse_error=openai_parse_error,
         recorded_at=recorded_at,
@@ -117,6 +169,7 @@ async def compare_from_text(text: str) -> CompareResult:
 async def compare_from_voice(
     audio_bytes: bytes,
     filename: str = "voice.ogg",
+    kind: CompareKind = "consumption",
 ) -> CompareResult:
     settings = get_settings()
     recorded_at = datetime.now(MOSCOW)
@@ -125,10 +178,11 @@ async def compare_from_voice(
 
     openai_stt: str | None = None
     openai_stt_error: str | None = None
+    openai_preview: PendingBatch | None = None
     food_diary: FoodDiaryResult | None = None
     openai_parse_error: str | None = None
 
-    # Local Ollama in parallel with OpenAI (VPN only wraps cloud calls).
+    preview_kind = "inventory" if kind == "inventory" else "consumption"
     local_task = asyncio.create_task(parse_inventory_text(local_stt))
     try:
         async with openai_vpn_session():
@@ -136,18 +190,23 @@ async def compare_from_voice(
                 stt_task = asyncio.create_task(
                     transcribe_audio_openai(audio_bytes, filename=filename)
                 )
-                diary_task = asyncio.create_task(_run_openai_diary(local_stt))
-                stt_outcome, diary_outcome = await asyncio.gather(
-                    stt_task, diary_task, return_exceptions=True
+                if kind == "inventory":
+                    cloud_task = asyncio.create_task(_run_openai_inventory(local_stt))
+                else:
+                    cloud_task = asyncio.create_task(_run_openai_diary(local_stt))
+                stt_outcome, cloud_outcome = await asyncio.gather(
+                    stt_task, cloud_task, return_exceptions=True
                 )
                 if isinstance(stt_outcome, Exception):
                     openai_stt_error = str(stt_outcome)
                 else:
                     openai_stt = stt_outcome
-                if isinstance(diary_outcome, Exception):
-                    openai_parse_error = str(diary_outcome)
+                if isinstance(cloud_outcome, Exception):
+                    openai_parse_error = str(cloud_outcome)
+                elif kind == "inventory":
+                    openai_preview, openai_parse_error = cloud_outcome
                 else:
-                    food_diary, openai_parse_error = diary_outcome
+                    food_diary, openai_parse_error = cloud_outcome
             else:
                 openai_stt_error = "OPENAI_API_KEY не задан"
                 openai_parse_error = "OPENAI_API_KEY не задан"
@@ -157,13 +216,17 @@ async def compare_from_voice(
     if isinstance(local_parsed, Exception):
         raise local_parsed
 
-    local_preview = preview_parsed(local_parsed, local_stt, recorded_at=recorded_at)
+    local_preview = preview_parsed(
+        local_parsed, local_stt, kind=preview_kind, recorded_at=recorded_at
+    )
 
     return CompareResult(
+        kind=kind,
         local_stt=local_stt,
         openai_stt=openai_stt,
         openai_stt_error=openai_stt_error,
         local_preview=local_preview,
+        openai_preview=openai_preview,
         food_diary=food_diary,
         openai_parse_error=openai_parse_error,
         recorded_at=recorded_at,

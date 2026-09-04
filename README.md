@@ -63,8 +63,8 @@ systemctl status food-whisper food-api food-bot
 
 - **Наличие** — только голос → `inventory_entries`
 - **Съел** — голос или текст → `consumption_entries`
-- **Сравнение** — голос/текст → local (Ollama) vs OpenAI *дневник питания*
-  (`meal_type`, `food`/`dish`, `amount`/`unit`, `amount_is_estimate`); в БД *не* пишем
+- **Сравн. наличие** — local vs OpenAI (схема наличия), без БД
+- **Сравн. съел** — local vs OpenAI дневник (`meal_type`…), без БД
 
 Модели OpenAI по умолчанию: `gpt-4o-mini` (дневник), `whisper-1` (STT).
 
