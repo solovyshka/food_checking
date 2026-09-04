@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     # Direct OpenAI (traffic to api.openai.com via HideMyName split VPN on server)
     openai_parse_model: str = "gpt-4o-mini"
-    openai_whisper_model: str = "whisper-1"
+    openai_whisper_model: str = "gpt-transcribe"
     openai_http_referer: str = "https://github.com/solovyshka/food_checking"
     openai_app_title: str = "food_checking"
     hideme_vpn_enabled: bool = True

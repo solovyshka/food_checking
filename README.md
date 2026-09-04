@@ -66,7 +66,7 @@ systemctl status food-whisper food-api food-bot
 - **Сравн. наличие** — local vs OpenAI (схема наличия), без БД
 - **Сравн. съел** — local vs OpenAI дневник (`meal_type`…), без БД
 
-Модели OpenAI по умолчанию: `gpt-4o-mini` (дневник), `whisper-1` (STT).
+Модели OpenAI по умолчанию: `gpt-4o-mini` (дневник), `gpt-transcribe` (STT).
 
 После записи (не сравнение) — Подтвердить / Отменить.
 
