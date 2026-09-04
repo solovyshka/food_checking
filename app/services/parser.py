@@ -92,7 +92,25 @@ def _parse_items(raw_items: object) -> tuple[list[ParsedItem], list[str]]:
     return items, skipped
 
 
+def parsed_from_model_content(content: str) -> ParsedInventory:
+    try:
+        data = _extract_json(content)
+    except ParseError:
+        return ParsedInventory(
+            entry_date=None,
+            items=[],
+            skipped=["не удалось разобрать ответ модели"],
+        )
+    items, skipped = _parse_items(data.get("items"))
+    return ParsedInventory(
+        entry_date=_parse_entry_date(data.get("entry_date")),
+        items=items,
+        skipped=skipped,
+    )
+
+
 async def parse_inventory_text(transcript: str) -> ParsedInventory:
+    """Local Ollama / Qwen parser."""
     settings = get_settings()
     payload = {
         "model": settings.qwen_model,
@@ -112,17 +130,33 @@ async def parse_inventory_text(transcript: str) -> ParsedInventory:
     if response.status_code != 200:
         raise ParseError(f"Ollama error {response.status_code}: {response.text}")
     content = response.json().get("message", {}).get("content", "")
-    try:
-        data = _extract_json(content)
-    except ParseError:
-        return ParsedInventory(
-            entry_date=None,
-            items=[],
-            skipped=["не удалось разобрать ответ модели"],
+    return parsed_from_model_content(content)
+
+
+async def parse_inventory_text_openai(transcript: str) -> ParsedInventory:
+    """Cloud chat parser via OpenAI-compatible API (same JSON as local)."""
+    from app.services.openai_client import openai_auth_headers
+
+    settings = get_settings()
+    if not settings.openai_api_key:
+        raise ParseError("OPENAI_API_KEY is not set")
+    payload = {
+        "model": settings.openai_parse_model,
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": transcript},
+        ],
+    }
+    headers = openai_auth_headers(json_content=True)
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(
+            f"{settings.openai_base_url.rstrip('/')}/chat/completions",
+            headers=headers,
+            json=payload,
         )
-    items, skipped = _parse_items(data.get("items"))
-    return ParsedInventory(
-        entry_date=_parse_entry_date(data.get("entry_date")),
-        items=items,
-        skipped=skipped,
-    )
+    if response.status_code != 200:
+        raise ParseError(f"Cloud parse error {response.status_code}: {response.text}")
+    content = response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+    return parsed_from_model_content(content or "")

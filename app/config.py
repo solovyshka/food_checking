@@ -15,9 +15,23 @@ class Settings(BaseSettings):
     qwen_url: str = "http://127.0.0.1:11434"
     qwen_model: str = "qwen2.5:7b-instruct-q4_K_M"
     ollama_keep_alive: str = "0"
+    openai_api_key: str = ""
+    openai_base_url: str = "https://api.openai.com/v1"
+    # Direct OpenAI (traffic to api.openai.com via HideMyName split VPN on server)
+    openai_parse_model: str = "gpt-4o-mini"
+    openai_whisper_model: str = "whisper-1"
+    openai_http_referer: str = "https://github.com/solovyshka/food_checking"
+    openai_app_title: str = "food_checking"
+    hideme_vpn_enabled: bool = True
+    hideme_vpn_script: str = "/opt/food_checking/deploy/vpn/hideme-openai.sh"
+    hideme_ovpn_conf: str = "/opt/secrets/food_checking/vpn/netherlands-split.ovpn"
     tz: str = "Europe/Moscow"
     app_host: str = "127.0.0.1"
     app_port: int = 8088
+
+    @property
+    def has_openai(self) -> bool:
+        return bool(self.openai_api_key.strip())
 
     @property
     def allowed_user_ids(self) -> set[int]:

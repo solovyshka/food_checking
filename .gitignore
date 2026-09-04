@@ -12,4 +12,5 @@ alembic/versions/*.pyc
 whisper_models/
 *.ogg
 *.wav
+*.ovpn
 .DS_Store
