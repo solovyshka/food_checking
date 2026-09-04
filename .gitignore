@@ -10,6 +10,8 @@ __pycache__/
 .mypy_cache/
 alembic/versions/*.pyc
 whisper_models/
+gigaam-venv/
+gigaam-src/
 *.ogg
 *.wav
 *.ovpn

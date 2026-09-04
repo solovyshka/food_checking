@@ -1,0 +1,19 @@
+[Unit]
+Description=Food Checking GigaAM STT
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/food_checking
+EnvironmentFile=/opt/food_checking/.env
+Environment=GIGAAM_HOST=127.0.0.1
+Environment=GIGAAM_PORT=9001
+Environment=GIGAAM_MODEL=v3_e2e_ctc
+Environment=GIGAAM_DEVICE=cpu
+ExecStart=/opt/food_checking/gigaam-venv/bin/python /opt/food_checking/gigaam/server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

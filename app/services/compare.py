@@ -24,6 +24,7 @@ from app.services.parser import (
 from app.services.transcription import (
     TranscriptionError,
     transcribe_audio,
+    transcribe_audio_gigaam,
     transcribe_audio_openai,
 )
 
@@ -36,6 +37,8 @@ CompareKind = Literal["inventory", "consumption"]
 class CompareResult:
     kind: CompareKind
     local_stt: str
+    gigaam_stt: str | None
+    gigaam_stt_error: str | None
     openai_stt: str | None
     openai_stt_error: str | None
     local_preview: PendingBatch
@@ -75,15 +78,23 @@ def format_compare_message(result: CompareResult) -> str:
     lines = [
         f"{title} (в БД *не* пишем)",
         "",
-        f"STT local: «{result.local_stt}»",
+        f"STT Whisper: «{result.local_stt}»",
     ]
+    if result.gigaam_stt is not None:
+        lines.append(f"STT GigaAM: «{result.gigaam_stt}»")
+    elif result.gigaam_stt_error:
+        lines.append(f"STT GigaAM: _{result.gigaam_stt_error}_")
     if result.openai_stt is not None:
         lines.append(f"STT OpenAI: «{result.openai_stt}»")
     elif result.openai_stt_error:
         lines.append(f"STT OpenAI: _{result.openai_stt_error}_")
 
     lines.append("")
-    lines.extend(_format_preview_block("Парсер local (Ollama)", result.local_preview))
+    lines.extend(
+        _format_preview_block(
+            "Парсер local (Ollama, по Whisper)", result.local_preview
+        )
+    )
     lines.append("")
 
     if result.kind == "inventory":
@@ -156,6 +167,8 @@ async def compare_from_text(
     return CompareResult(
         kind=kind,
         local_stt=transcript,
+        gigaam_stt=None,
+        gigaam_stt_error=None,
         openai_stt=None,
         openai_stt_error=None,
         local_preview=local_preview,
@@ -174,7 +187,18 @@ async def compare_from_voice(
     settings = get_settings()
     recorded_at = datetime.now(MOSCOW)
 
+    # Sequential local STT to avoid RAM spike (Whisper then GigaAM, both unload).
     local_stt = await transcribe_audio(audio_bytes, filename=filename)
+
+    gigaam_stt: str | None = None
+    gigaam_stt_error: str | None = None
+    if settings.gigaam_enabled:
+        try:
+            gigaam_stt = await transcribe_audio_gigaam(audio_bytes, filename=filename)
+        except TranscriptionError as exc:
+            gigaam_stt_error = str(exc)
+    else:
+        gigaam_stt_error = "GigaAM выключен"
 
     openai_stt: str | None = None
     openai_stt_error: str | None = None
@@ -223,6 +247,8 @@ async def compare_from_voice(
     return CompareResult(
         kind=kind,
         local_stt=local_stt,
+        gigaam_stt=gigaam_stt,
+        gigaam_stt_error=gigaam_stt_error,
         openai_stt=openai_stt,
         openai_stt_error=openai_stt_error,
         local_preview=local_preview,

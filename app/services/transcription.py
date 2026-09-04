@@ -52,3 +52,24 @@ async def transcribe_audio_openai(audio_bytes: bytes, filename: str = "voice.ogg
     if not text:
         raise TranscriptionError("Cloud STT returned empty transcript")
     return text
+
+
+async def transcribe_audio_gigaam(audio_bytes: bytes, filename: str = "voice.ogg") -> str:
+    """Local GigaAM service (https://github.com/salute-developers/GigaAM)."""
+    settings = get_settings()
+    if not settings.gigaam_enabled:
+        raise TranscriptionError("GigaAM disabled (GIGAAM_ENABLED=0)")
+    async with httpx.AsyncClient(timeout=600.0) as client:
+        response = await client.post(
+            f"{settings.gigaam_url.rstrip('/')}/transcribe",
+            files={"file": (filename, audio_bytes, "audio/ogg")},
+            data={"language": "ru"},
+        )
+    if response.status_code != 200:
+        raise TranscriptionError(
+            f"GigaAM error {response.status_code}: {response.text[:300]}"
+        )
+    text = (response.json().get("text") or "").strip()
+    if not text:
+        raise TranscriptionError("GigaAM returned empty transcript")
+    return text
