@@ -1,3 +1,8 @@
+# FastAPI wrapper deps. Install GigaAM + CPU torch separately on the server:
+#   pip install -r requirements.txt
+#   pip install -e "/opt/food_checking/gigaam-src[torch]" --no-deps  # or with deps then replace torch
+#   pip uninstall -y torch torchaudio triton nvidia-* cuda-* || true
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
 fastapi==0.115.12
 uvicorn[standard]==0.34.2
 python-multipart==0.0.20
