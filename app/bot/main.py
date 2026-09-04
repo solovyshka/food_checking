@@ -84,7 +84,7 @@ async def handle_voice(message: Message) -> None:
 
         await status_msg.edit_text(
             format_pending_table(batch),
-            reply_markup=_confirm_keyboard(batch.batch_id),
+            reply_markup=_confirm_keyboard(batch.batch_id) if batch.batch_id else None,
             parse_mode="Markdown",
         )
     except Exception as exc:
