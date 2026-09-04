@@ -92,7 +92,7 @@ def format_compare_message(result: CompareResult) -> str:
     lines.append("")
     lines.extend(
         _format_preview_block(
-            "Парсер local (Ollama, по Whisper)", result.local_preview
+            "Парсер local (Ollama, по GigaAM)", result.local_preview
         )
     )
     lines.append("")
@@ -200,6 +200,9 @@ async def compare_from_voice(
     else:
         gigaam_stt_error = "GigaAM выключен"
 
+    # Ollama (+ OpenAI inventory/diary parse) use GigaAM text when available.
+    parse_transcript = gigaam_stt or local_stt
+
     openai_stt: str | None = None
     openai_stt_error: str | None = None
     openai_preview: PendingBatch | None = None
@@ -207,7 +210,7 @@ async def compare_from_voice(
     openai_parse_error: str | None = None
 
     preview_kind = "inventory" if kind == "inventory" else "consumption"
-    local_task = asyncio.create_task(parse_inventory_text(local_stt))
+    local_task = asyncio.create_task(parse_inventory_text(parse_transcript))
     try:
         async with openai_vpn_session():
             if settings.has_openai:
@@ -215,9 +218,11 @@ async def compare_from_voice(
                     transcribe_audio_openai(audio_bytes, filename=filename)
                 )
                 if kind == "inventory":
-                    cloud_task = asyncio.create_task(_run_openai_inventory(local_stt))
+                    cloud_task = asyncio.create_task(
+                        _run_openai_inventory(parse_transcript)
+                    )
                 else:
-                    cloud_task = asyncio.create_task(_run_openai_diary(local_stt))
+                    cloud_task = asyncio.create_task(_run_openai_diary(parse_transcript))
                 stt_outcome, cloud_outcome = await asyncio.gather(
                     stt_task, cloud_task, return_exceptions=True
                 )
@@ -241,7 +246,7 @@ async def compare_from_voice(
         raise local_parsed
 
     local_preview = preview_parsed(
-        local_parsed, local_stt, kind=preview_kind, recorded_at=recorded_at
+        local_parsed, parse_transcript, kind=preview_kind, recorded_at=recorded_at
     )
 
     return CompareResult(

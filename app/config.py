@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     openai_app_title: str = "food_checking"
     gigaam_url: str = "http://127.0.0.1:9001"
     gigaam_enabled: bool = True
+    # Primary STT for Ollama pipeline: gigaam | whisper
+    voice_stt_backend: str = "gigaam"
     hideme_vpn_enabled: bool = True
     hideme_vpn_script: str = "/opt/food_checking/deploy/vpn/hideme-openai.sh"
     hideme_ovpn_conf: str = "/opt/secrets/food_checking/vpn/netherlands-split.ovpn"

@@ -67,7 +67,8 @@ systemctl status food-whisper food-api food-bot
 - **Сравн. съел** — local vs OpenAI дневник (`meal_type`…), без БД
 
 Модели OpenAI по умолчанию: `gpt-4o-mini` (дневник), `gpt-transcribe` (STT).
-В сравнении голоса также: local Whisper + **GigaAM** (`v3_e2e_ctc`, сервис `:9001`).
+В сравнении голоса: Whisper + **GigaAM** + OpenAI STT.
+**Ollama** парсит текст от **GigaAM** (`VOICE_STT_BACKEND=gigaam`; Whisper — fallback).
 
 После записи (не сравнение) — Подтвердить / Отменить.
 

@@ -73,3 +73,26 @@ async def transcribe_audio_gigaam(audio_bytes: bytes, filename: str = "voice.ogg
     if not text:
         raise TranscriptionError("GigaAM returned empty transcript")
     return text
+
+
+async def transcribe_for_pipeline(
+    audio_bytes: bytes,
+    filename: str = "voice.ogg",
+) -> tuple[str, str]:
+    """STT for production pipeline. Returns (text, backend_name).
+
+    Default: GigaAM, with Whisper fallback if GigaAM fails or is disabled.
+    """
+    settings = get_settings()
+    backend = (settings.voice_stt_backend or "gigaam").strip().lower()
+    if backend == "whisper":
+        return await transcribe_audio(audio_bytes, filename=filename), "whisper"
+    if backend != "gigaam":
+        raise TranscriptionError(f"Unknown VOICE_STT_BACKEND={backend!r}")
+    try:
+        return await transcribe_audio_gigaam(audio_bytes, filename=filename), "gigaam"
+    except TranscriptionError:
+        if not settings.gigaam_enabled:
+            return await transcribe_audio(audio_bytes, filename=filename), "whisper"
+        # Fallback when GigaAM errors
+        return await transcribe_audio(audio_bytes, filename=filename), "whisper-fallback"
