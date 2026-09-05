@@ -11,6 +11,8 @@ Environment=GIGAAM_HOST=127.0.0.1
 Environment=GIGAAM_PORT=9001
 Environment=GIGAAM_MODEL=v3_e2e_ctc
 Environment=GIGAAM_DEVICE=cpu
+Environment=GIGAAM_KEEP_ALIVE=1
+TimeoutStartSec=180
 ExecStart=/opt/food_checking/gigaam-venv/bin/python /opt/food_checking/gigaam/server.py
 Restart=always
 RestartSec=5

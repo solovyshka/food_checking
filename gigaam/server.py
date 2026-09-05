@@ -1,6 +1,7 @@
 import os
 import tempfile
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -9,10 +10,14 @@ MODEL_NAME = os.getenv("GIGAAM_MODEL", "v3_e2e_ctc")
 HOST = os.getenv("GIGAAM_HOST", "127.0.0.1")
 PORT = int(os.getenv("GIGAAM_PORT", "9001"))
 DEVICE = os.getenv("GIGAAM_DEVICE", "cpu")
+KEEP_ALIVE = os.getenv("GIGAAM_KEEP_ALIVE", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
 
-app = FastAPI(title="Food GigaAM STT")
 _model = None
-_model_lock = threading.Lock()
+_model_lock = threading.RLock()
 
 
 def get_model():
@@ -46,9 +51,28 @@ def unload_model() -> None:
         pass
 
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    if KEEP_ALIVE:
+        get_model()
+    yield
+    if not KEEP_ALIVE:
+        unload_model()
+
+
+app = FastAPI(title="Food GigaAM STT", lifespan=lifespan)
+
+
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "model": MODEL_NAME, "device": DEVICE}
+def health() -> dict[str, str | bool]:
+    loaded = _model is not None
+    return {
+        "status": "ok",
+        "model": MODEL_NAME,
+        "device": DEVICE,
+        "keep_alive": KEEP_ALIVE,
+        "loaded": loaded,
+    }
 
 
 @app.post("/transcribe")
@@ -86,8 +110,9 @@ async def transcribe(
             )
             converted = True
 
-        model = get_model()
-        text = model.transcribe(wav_path)
+        with _model_lock:
+            model = get_model()
+            text = model.transcribe(wav_path)
         if hasattr(text, "text"):
             text = text.text
         text = str(text or "").strip()
@@ -102,7 +127,8 @@ async def transcribe(
         Path(tmp_path).unlink(missing_ok=True)
         if converted:
             Path(wav_path).unlink(missing_ok=True)
-        unload_model()
+        if not KEEP_ALIVE:
+            unload_model()
 
 
 if __name__ == "__main__":
