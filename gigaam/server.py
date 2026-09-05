@@ -1,6 +1,8 @@
+import logging
 import os
 import tempfile
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -15,6 +17,9 @@ KEEP_ALIVE = os.getenv("GIGAAM_KEEP_ALIVE", "1").strip().lower() not in {
     "false",
     "no",
 }
+CACHE_DIR = os.getenv("GIGAAM_CACHE", "").strip() or None
+
+logger = logging.getLogger("uvicorn.error")
 
 _model = None
 _model_lock = threading.RLock()
@@ -26,12 +31,14 @@ def get_model():
         if _model is None:
             import gigaam
 
-            _model = gigaam.load_model(
-                MODEL_NAME,
+            load_kw = dict(
                 device=DEVICE,
                 fp16_encoder=False,
                 use_flash=False,
             )
+            if CACHE_DIR:
+                load_kw["download_root"] = CACHE_DIR
+            _model = gigaam.load_model(MODEL_NAME, **load_kw)
         return _model
 
 
@@ -72,6 +79,7 @@ def health() -> dict[str, str | bool]:
         "device": DEVICE,
         "keep_alive": KEEP_ALIVE,
         "loaded": loaded,
+        "cache": CACHE_DIR or "~/.cache/gigaam",
     }
 
 
@@ -79,20 +87,24 @@ def health() -> dict[str, str | bool]:
 async def transcribe(
     file: UploadFile = File(...),
     language: str = Form("ru"),
-) -> dict[str, str]:
+) -> dict[str, str | float]:
     del language  # GigaAM-v3 RU models; kept for API parity with Whisper
     suffix = Path(file.filename or "voice.ogg").suffix or ".ogg"
+    t_all = time.perf_counter()
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(await file.read())
         tmp_path = tmp.name
     wav_path = tmp_path
     converted = False
+    ffmpeg_s = 0.0
+    infer_s = 0.0
     try:
         # Prefer wav 16k mono for stable decoding.
         if suffix.lower() != ".wav":
             import subprocess
 
             wav_path = tmp_path + ".wav"
+            t_ff = time.perf_counter()
             subprocess.run(
                 [
                     "ffmpeg",
@@ -108,17 +120,34 @@ async def transcribe(
                 check=True,
                 capture_output=True,
             )
+            ffmpeg_s = time.perf_counter() - t_ff
             converted = True
 
         with _model_lock:
             model = get_model()
+            t_inf = time.perf_counter()
             text = model.transcribe(wav_path)
+            infer_s = time.perf_counter() - t_inf
         if hasattr(text, "text"):
             text = text.text
         text = str(text or "").strip()
         if not text:
             raise HTTPException(status_code=422, detail="Empty transcript")
-        return {"text": text, "model": MODEL_NAME}
+        total_s = time.perf_counter() - t_all
+        logger.info(
+            "TIMING gigaam ffmpeg=%.2fs infer=%.2fs total=%.2fs chars=%s",
+            ffmpeg_s,
+            infer_s,
+            total_s,
+            len(text),
+        )
+        return {
+            "text": text,
+            "model": MODEL_NAME,
+            "ffmpeg_s": round(ffmpeg_s, 3),
+            "infer_s": round(infer_s, 3),
+            "total_s": round(total_s, 3),
+        }
     except HTTPException:
         raise
     except Exception as exc:

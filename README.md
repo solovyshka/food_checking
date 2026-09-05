@@ -63,14 +63,10 @@ systemctl status food-whisper food-api food-bot
 
 - **Наличие** — только голос → `inventory_entries`
 - **Съел** — голос или текст → `consumption_entries` (любые блюда, единицы г/мл, опционально ккал/100г)
-- **Сравн. наличие** — local vs OpenAI (схема наличия), без БД
-- **Сравн. съел** — local vs OpenAI дневник (`meal_type`…), без БД
 
-Модели OpenAI по умолчанию: `gpt-4o-mini` (дневник), `gpt-transcribe` (STT).
-В сравнении голоса: Whisper + **GigaAM** + OpenAI STT.
 **Ollama** парсит текст от **GigaAM** (`VOICE_STT_BACKEND=gigaam`; Whisper — fallback).
 
-После записи (не сравнение) — Подтвердить / Отменить.
+После записи — Подтвердить / Отменить.
 
 API:
 
@@ -81,7 +77,7 @@ API:
 
 ## OpenAI напрямую (через HideMyName split-VPN)
 
-С сервера `api.openai.com` без VPN даёт 403 (регион). В режиме **Сравнение** бот сам:
+С сервера `api.openai.com` без VPN даёт 403 (регион). Скрипт VPN (бот его сейчас не вызывает):
 
 1. поднимает HideMyName OpenVPN **только** с маршрутами на `api.openai.com`
 2. дергает OpenAI

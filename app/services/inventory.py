@@ -83,6 +83,7 @@ class PendingBatch:
     unknown_names: list[str]
     missing_quantity: list[str]
     skipped: list[str]
+    timing_note: str = ""
 
 
 def _map_inventory_items(
@@ -417,6 +418,8 @@ def format_pending_table(batch: PendingBatch) -> str:
     if batch.skipped:
         lines.append(f"Не разобрал: {', '.join(batch.skipped)}")
     lines.append(f"Транскрипт: «{batch.transcript}»")
+    if batch.timing_note:
+        lines.append(batch.timing_note)
     return "\n".join(lines)
 
 

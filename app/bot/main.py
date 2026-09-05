@@ -1,8 +1,11 @@
 import asyncio
 import logging
+import socket
+import time
 from typing import Any, Literal
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -13,12 +16,6 @@ from aiogram.types import (
 
 from app.config import get_settings
 from app.db.session import SessionLocal
-from app.services.compare import (
-    CompareKind,
-    compare_from_text,
-    compare_from_voice,
-    format_compare_message,
-)
 from app.services.inventory import (
     EntryKind,
     KIND_LABELS,
@@ -38,12 +35,10 @@ settings = get_settings()
 bot: Bot | None = None
 dp = Dispatcher()
 
-BotMode = Literal["inventory", "consumption", "compare_stock", "compare_eat"]
+BotMode = Literal["inventory", "consumption"]
 
 BTN_STOCK = "Наличие"
 BTN_EAT = "Съел"
-BTN_COMPARE_STOCK = "Сравн. наличие"
-BTN_COMPARE_EAT = "Сравн. съел"
 BTN_LIST_STOCK = "Список наличия"
 BTN_LIST_EAT = "Список съеденного"
 
@@ -51,8 +46,6 @@ ALL_BUTTONS = frozenset(
     {
         BTN_STOCK,
         BTN_EAT,
-        BTN_COMPARE_STOCK,
-        BTN_COMPARE_EAT,
         BTN_LIST_STOCK,
         BTN_LIST_EAT,
     }
@@ -66,7 +59,10 @@ def get_bot() -> Bot:
     if bot is None:
         if not settings.telegram_bot_token:
             raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
-        bot = Bot(token=settings.telegram_bot_token)
+        # api.telegram.org has broken IPv6 from this host; happy-eyeballs then times out.
+        session = AiohttpSession()
+        session._connector_init["family"] = socket.AF_INET
+        bot = Bot(token=settings.telegram_bot_token, session=session)
     return bot
 
 
@@ -85,31 +81,15 @@ def set_mode(user_id: int, kind: BotMode) -> None:
     _user_modes[user_id] = kind
 
 
-def _compare_kind(mode: BotMode) -> CompareKind | None:
-    if mode == "compare_stock":
-        return "inventory"
-    if mode == "compare_eat":
-        return "consumption"
-    return None
-
-
 def mode_keyboard(kind: BotMode) -> ReplyKeyboardMarkup:
     if kind == "consumption":
         rows = [
-            [KeyboardButton(text=BTN_STOCK), KeyboardButton(text=BTN_COMPARE_EAT)],
+            [KeyboardButton(text=BTN_STOCK)],
             [KeyboardButton(text=BTN_LIST_EAT)],
-        ]
-    elif kind == "compare_stock":
-        rows = [
-            [KeyboardButton(text=BTN_STOCK), KeyboardButton(text=BTN_COMPARE_EAT)],
-        ]
-    elif kind == "compare_eat":
-        rows = [
-            [KeyboardButton(text=BTN_EAT), KeyboardButton(text=BTN_COMPARE_STOCK)],
         ]
     else:
         rows = [
-            [KeyboardButton(text=BTN_EAT), KeyboardButton(text=BTN_COMPARE_STOCK)],
+            [KeyboardButton(text=BTN_EAT)],
             [KeyboardButton(text=BTN_LIST_STOCK)],
         ]
     return ReplyKeyboardMarkup(
@@ -120,31 +100,6 @@ def mode_keyboard(kind: BotMode) -> ReplyKeyboardMarkup:
 
 
 def _help_text(kind: BotMode) -> str:
-    openai_hint = (
-        "OpenAI через HideMyName split-VPN."
-        if settings.has_openai
-        else "Нужен `OPENAI_API_KEY` в `.env`."
-    )
-    if kind == "compare_stock":
-        return (
-            "Режим: *Сравн. наличие*\n\n"
-            "Голос или текст → local (Ollama) vs OpenAI "
-            "(та же схема: продукт + кол-во).\n"
-            "В базу *не* пишем.\n"
-            f"{openai_hint}\n\n"
-            f"• *{BTN_STOCK}* — запись наличия\n"
-            f"• *{BTN_COMPARE_EAT}* — сравнение «съел»"
-        )
-    if kind == "compare_eat":
-        return (
-            "Режим: *Сравн. съел*\n\n"
-            "Голос или текст → local vs OpenAI *дневник* "
-            "(`meal_type`, ед., оценка).\n"
-            "В базу *не* пишем.\n"
-            f"{openai_hint}\n\n"
-            f"• *{BTN_EAT}* — запись съеденного\n"
-            f"• *{BTN_COMPARE_STOCK}* — сравнение наличия"
-        )
     if kind == "consumption":
         return (
             f"Режим: *{KIND_LABELS[kind]}*\n\n"
@@ -152,14 +107,12 @@ def _help_text(kind: BotMode) -> str:
             "единицы — *г* или *мл* (порции переводятся). "
             "Калорийность — если скажете число («100 калорий»), пишем как ккал/100 г.\n"
             f"• *{BTN_STOCK}* — наличие\n"
-            f"• *{BTN_COMPARE_EAT}* — сравнить парсеры без БД\n"
             f"• *{BTN_LIST_EAT}* — список съеденного"
         )
     return (
         f"Режим: *{KIND_LABELS[kind]}*\n\n"
         "Только *голосовое* — что есть дома.\n"
         f"• *{BTN_EAT}* — съел (голос/текст)\n"
-        f"• *{BTN_COMPARE_STOCK}* — сравнить парсеры наличия без БД\n"
         f"• *{BTN_LIST_STOCK}* — список наличия"
     )
 
@@ -242,32 +195,6 @@ async def on_mode_eat(message: Message) -> None:
     )
 
 
-@dp.message(F.text == BTN_COMPARE_STOCK)
-async def on_mode_compare_stock(message: Message) -> None:
-    if not is_allowed(message.from_user.id if message.from_user else None):
-        return
-    user_id = message.from_user.id  # type: ignore[union-attr]
-    set_mode(user_id, "compare_stock")
-    await message.answer(
-        _help_text("compare_stock"),
-        reply_markup=mode_keyboard("compare_stock"),
-        parse_mode="Markdown",
-    )
-
-
-@dp.message(F.text == BTN_COMPARE_EAT)
-async def on_mode_compare_eat(message: Message) -> None:
-    if not is_allowed(message.from_user.id if message.from_user else None):
-        return
-    user_id = message.from_user.id  # type: ignore[union-attr]
-    set_mode(user_id, "compare_eat")
-    await message.answer(
-        _help_text("compare_eat"),
-        reply_markup=mode_keyboard("compare_eat"),
-        parse_mode="Markdown",
-    )
-
-
 @dp.message(F.text == BTN_LIST_STOCK)
 async def on_list_stock(message: Message) -> None:
     await cmd_inventory(message)
@@ -286,32 +213,12 @@ async def handle_voice(message: Message) -> None:
         return
 
     mode = get_mode(message.from_user.id)
-    compare_kind = _compare_kind(mode)
-    if compare_kind is not None:
-        label = "наличие" if compare_kind == "inventory" else "съел"
-        status_msg = await message.answer(f"Сравнение {label} (голос, без БД)...")
-        try:
-            buffer = await get_bot().download(message.voice)
-            if buffer is None:
-                raise RuntimeError("Failed to download voice message")
-            result = await compare_from_voice(
-                buffer.read(),
-                filename="voice.ogg",
-                kind=compare_kind,
-            )
-            await status_msg.edit_text(
-                format_compare_message(result),
-                parse_mode="Markdown",
-            )
-        except Exception as exc:
-            logger.exception("Compare voice failed")
-            await status_msg.edit_text(f"Ошибка сравнения: {exc}")
-        return
-
-    label = KIND_LABELS[mode]  # type: ignore[index]
+    label = KIND_LABELS[mode]
     status_msg = await message.answer(f"Обрабатываю голосовое ({label})...")
     try:
+        t0 = time.perf_counter()
         buffer = await get_bot().download(message.voice)
+        download_s = time.perf_counter() - t0
         if buffer is None:
             raise RuntimeError("Failed to download voice message")
 
@@ -321,8 +228,19 @@ async def handle_voice(message: Message) -> None:
                 audio_bytes=buffer.read(),
                 filename="voice.ogg",
                 telegram_message_id=str(message.message_id),
-                kind=mode,  # type: ignore[arg-type]
+                kind=mode,
             )
+        voice_sec = message.voice.duration
+        extra = f" · скачать {download_s:.1f}с"
+        if voice_sec:
+            extra += f" · аудио {voice_sec}с"
+        if batch.timing_note:
+            batch.timing_note += extra
+        logger.info(
+            "TIMING telegram_download=%.2fs voice_duration=%s",
+            download_s,
+            voice_sec,
+        )
 
         await _send_pending(message, batch, status_msg=status_msg)
     except Exception as exc:
@@ -341,25 +259,10 @@ async def handle_text(message: Message) -> None:
         return
 
     mode = get_mode(message.from_user.id)
-    compare_kind = _compare_kind(mode)
-    if compare_kind is not None:
-        label = "наличие" if compare_kind == "inventory" else "съел"
-        status_msg = await message.answer(f"Сравнение {label} (текст, без БД)...")
-        try:
-            result = await compare_from_text(text, kind=compare_kind)
-            await status_msg.edit_text(
-                format_compare_message(result),
-                parse_mode="Markdown",
-            )
-        except Exception as exc:
-            logger.exception("Compare text failed")
-            await status_msg.edit_text(f"Ошибка сравнения: {exc}")
-        return
-
     if mode != "consumption":
         await message.answer(
-            "Текст — в *Съел* или режимах сравнения.\n"
-            f"*{BTN_EAT}* / *{BTN_COMPARE_STOCK}* / *{BTN_COMPARE_EAT}*.",
+            "Текст — в режиме *Съел*.\n"
+            f"Нажмите *{BTN_EAT}*.",
             reply_markup=mode_keyboard(mode),
             parse_mode="Markdown",
         )

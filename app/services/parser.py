@@ -1,5 +1,7 @@
 import json
+import logging
 import re
+import time
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -90,6 +92,9 @@ class ParsedInventory:
 
 class ParseError(Exception):
     pass
+
+
+logger = logging.getLogger(__name__)
 
 
 def _extract_json(text: str) -> dict:
@@ -193,6 +198,14 @@ def _parse_items(
     return items, skipped
 
 
+def _ollama_keep_alive(raw: str) -> int | str:
+    """Ollama JSON keep_alive: bare ints as numbers (-1 = forever). Strings need a unit (5m)."""
+    text = raw.strip()
+    if re.fullmatch(r"-?\d+", text):
+        return int(text)
+    return text
+
+
 def parsed_from_model_content(
     content: str, *, consumption: bool = False
 ) -> ParsedInventory:
@@ -212,38 +225,64 @@ def parsed_from_model_content(
     )
 
 
-async def _parse_with_ollama(transcript: str, system_prompt: str) -> str:
+async def _parse_with_ollama(transcript: str, system_prompt: str) -> tuple[str, str]:
     settings = get_settings()
     payload = {
         "model": settings.qwen_model,
         "stream": False,
-        "keep_alive": settings.ollama_keep_alive,
+        "keep_alive": _ollama_keep_alive(settings.ollama_keep_alive),
         "format": "json",
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": transcript},
         ],
     }
+    t0 = time.perf_counter()
     async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(
             f"{settings.qwen_url.rstrip('/')}/api/chat",
             json=payload,
         )
+    http_s = time.perf_counter() - t0
     if response.status_code != 200:
         raise ParseError(f"Ollama error {response.status_code}: {response.text}")
-    return response.json().get("message", {}).get("content", "") or ""
+    body = response.json()
+    content = body.get("message", {}).get("content", "") or ""
+    load_s = int(body.get("load_duration") or 0) / 1e9
+    prompt_s = int(body.get("prompt_eval_duration") or 0) / 1e9
+    gen_s = int(body.get("eval_duration") or 0) / 1e9
+    prompt_n = int(body.get("prompt_eval_count") or 0)
+    gen_n = int(body.get("eval_count") or 0)
+    parts = []
+    if load_s >= 0.05:
+        parts.append(f"загрузка {load_s:.1f}с")
+    if prompt_n:
+        parts.append(f"промпт {prompt_s:.1f}с/{prompt_n}ток")
+    if gen_n:
+        parts.append(f"ответ {gen_s:.1f}с/{gen_n}ток")
+    detail = f"({', '.join(parts)})" if parts else ""
+    logger.info(
+        "TIMING ollama http=%.2fs load=%.2fs prompt=%.2fs/%s gen=%.2fs/%s",
+        http_s,
+        load_s,
+        prompt_s,
+        prompt_n,
+        gen_s,
+        gen_n,
+    )
+    return content, detail
 
 
-async def parse_inventory_text(transcript: str) -> ParsedInventory:
+async def parse_inventory_text(transcript: str) -> tuple[ParsedInventory, str]:
     """Local Ollama / Qwen parser for stock (catalog units)."""
-    content = await _parse_with_ollama(transcript, SYSTEM_PROMPT)
-    return parsed_from_model_content(content)
+    content, detail = await _parse_with_ollama(transcript, SYSTEM_PROMPT)
+    return parsed_from_model_content(content), detail
 
 
-async def parse_consumption_text(transcript: str) -> ParsedInventory:
+async def parse_consumption_text(transcript: str) -> tuple[ParsedInventory, str]:
     """Local parser for eaten food: any name, units г/мл."""
-    content = await _parse_with_ollama(transcript, CONSUMPTION_SYSTEM_PROMPT)
-    return parsed_from_model_content(content, consumption=True)
+    content, detail = await _parse_with_ollama(transcript, CONSUMPTION_SYSTEM_PROMPT)
+    return parsed_from_model_content(content, consumption=True), detail
 
 
 async def parse_inventory_text_openai(transcript: str) -> ParsedInventory:

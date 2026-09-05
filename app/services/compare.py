@@ -164,7 +164,7 @@ async def compare_from_text(
     transcript = text.strip()
     preview_kind = "inventory" if kind == "inventory" else "consumption"
     parse = parse_consumption_text if kind == "consumption" else parse_inventory_text
-    local_parsed = await parse(transcript)
+    local_parsed, _ = await parse(transcript)
     local_preview = preview_parsed(
         local_parsed, transcript, kind=preview_kind, recorded_at=recorded_at
     )
@@ -209,7 +209,7 @@ async def compare_from_voice(
     gigaam_stt_error: str | None = None
     if settings.gigaam_enabled:
         try:
-            gigaam_stt = await transcribe_audio_gigaam(audio_bytes, filename=filename)
+            gigaam_stt, _ = await transcribe_audio_gigaam(audio_bytes, filename=filename)
         except TranscriptionError as exc:
             gigaam_stt_error = str(exc)
     else:
@@ -256,7 +256,7 @@ async def compare_from_voice(
                 openai_stt_error = "OPENAI_API_KEY не задан"
                 openai_parse_error = "OPENAI_API_KEY не задан"
     finally:
-        local_parsed = await local_task
+        local_parsed, _ = await local_task
 
     if isinstance(local_parsed, Exception):
         raise local_parsed
