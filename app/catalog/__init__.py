@@ -1,3 +1,3 @@
-from app.catalog.units import STORAGE_UNITS
+from app.catalog.units import CONSUMPTION_UNITS, STORAGE_UNITS
 
-__all__ = ["STORAGE_UNITS"]
+__all__ = ["CONSUMPTION_UNITS", "STORAGE_UNITS"]

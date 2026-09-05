@@ -35,6 +35,9 @@ def _batch_response(batch) -> dict:
                 "product_name": row.product_name,
                 "quantity": str(row.quantity),
                 "unit": row.unit,
+                "kcal_per_100g": (
+                    str(row.kcal_per_100g) if row.kcal_per_100g is not None else None
+                ),
             }
             for row in batch.rows
         ],
@@ -107,6 +110,9 @@ def inventory_list(
                 "product_name": row.product_name,
                 "quantity": str(row.quantity),
                 "unit": row.unit,
+                "kcal_per_100g": (
+                    str(row.kcal_per_100g) if row.kcal_per_100g is not None else None
+                ),
                 "entry_date": row.entry_date.isoformat(),
                 "recorded_at": row.recorded_at.isoformat(),
             }
@@ -132,6 +138,9 @@ def consumption_list(
                 "product_name": row.product_name,
                 "quantity": str(row.quantity),
                 "unit": row.unit,
+                "kcal_per_100g": (
+                    str(row.kcal_per_100g) if row.kcal_per_100g is not None else None
+                ),
                 "entry_date": row.entry_date.isoformat(),
                 "recorded_at": row.recorded_at.isoformat(),
             }

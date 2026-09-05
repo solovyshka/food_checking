@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from app.services.inventory import EntryKind, PendingBatch, create_pending_entries
-from app.services.parser import parse_inventory_text
+from app.services.parser import parse_consumption_text, parse_inventory_text
 from app.services.transcription import transcribe_for_pipeline
 
 MOSCOW = ZoneInfo("Europe/Moscow")
@@ -18,7 +18,8 @@ async def process_text_message(
 ) -> PendingBatch:
     recorded_at = datetime.now(MOSCOW)
     transcript = text.strip()
-    parsed = await parse_inventory_text(transcript)
+    parse = parse_consumption_text if kind == "consumption" else parse_inventory_text
+    parsed = await parse(transcript)
     return create_pending_entries(
         db=db,
         parsed=parsed,
@@ -40,7 +41,8 @@ async def process_voice_message(
     recorded_at = datetime.now(MOSCOW)
     # Ollama gets GigaAM transcript by default (Whisper only as fallback).
     transcript, _backend = await transcribe_for_pipeline(audio_bytes, filename=filename)
-    parsed = await parse_inventory_text(transcript)
+    parse = parse_consumption_text if kind == "consumption" else parse_inventory_text
+    parsed = await parse(transcript)
     return create_pending_entries(
         db=db,
         parsed=parsed,

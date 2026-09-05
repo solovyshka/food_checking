@@ -62,7 +62,7 @@ systemctl status food-whisper food-api food-bot
 Разные клавиатуры:
 
 - **Наличие** — только голос → `inventory_entries`
-- **Съел** — голос или текст → `consumption_entries`
+- **Съел** — голос или текст → `consumption_entries` (любые блюда, единицы г/мл, опционально ккал/100г)
 - **Сравн. наличие** — local vs OpenAI (схема наличия), без БД
 - **Сравн. съел** — local vs OpenAI дневник (`meal_type`…), без БД
 

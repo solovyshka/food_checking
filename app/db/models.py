@@ -51,6 +51,7 @@ class ConsumptionEntry(Base):
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), nullable=False)
     quantity: Mapped[Decimal] = mapped_column(Numeric(12, 3), nullable=False)
     unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    kcal_per_100g: Mapped[Decimal | None] = mapped_column(Numeric(8, 2), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     source: Mapped[str] = mapped_column(String(16), nullable=False, default="voice")
     transcript: Mapped[str | None] = mapped_column(Text)

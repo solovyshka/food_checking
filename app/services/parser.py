@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 
 import httpx
 
+from app.catalog.units import CONSUMPTION_UNITS
 from app.config import get_settings
 
 SYSTEM_PROMPT = """Ты извлекаешь список продуктов из русского текста.
@@ -22,11 +23,62 @@ quantity — сколько единиц назвал человек (число
 Если количество неясно — всё равно верни item с "quantity": null.
 Если дата не указана явно, entry_date = null."""
 
+CONSUMPTION_SYSTEM_PROMPT = """Ты извлекаешь съеденное из русского текста.
+Справочника продуктов нет: записывай ВСЕ блюда и продукты, как их назвали (борщ, омлет, яблоко, кофе).
+Не подгоняй названия под складской список (не «пачка», не «десяток»).
+Единицы ТОЛЬКО "г" или "мл". Переведи порции, штуки, стаканы, тарелки, кг, литры в граммы или миллилитры (оценка нормальна).
+Жидкости (напитки, суп, молоко, сок) — мл. Всё остальное — г.
+Примеры порций: 2 яйца → 120 г; стакан молока → 200 мл; тарелка супа → 250 мл; кусок хлеба → 30 г; 0.5 кг курицы → 500 г.
+
+kcal_per_100g — опционально. Заполняй ТОЛЬКО если человек ЯВНО назвал калорийность.
+Не выдумывай калории из своих знаний, если не сказано — ставь null.
+Человек говорит просто «калорийность N калорий/ккал», БЕЗ «на 100 грамм». Это число и пиши в kcal_per_100g как есть, не пересчитывай на порцию.
+Пример: «съел 100 грамм творога 2% с калорийностью 100 калорий» → quantity 100, unit "г", kcal_per_100g 100.
+«борщ тарелка» без калорийности → kcal_per_100g null.
+
+Верни ТОЛЬКО валидный JSON без markdown:
+{
+  "entry_date": "YYYY-MM-DD" или null,
+  "items": [
+    {"name": "творог", "quantity": 150, "unit": "г", "kcal_per_100g": 110},
+    {"name": "борщ", "quantity": 250, "unit": "мл", "kcal_per_100g": null}
+  ]
+}
+name — как сказано, коротко.
+quantity — число уже в г или мл.
+Всегда оцени quantity, даже если порция «примерно» или «тарелка».
+Если дата не указана явно, entry_date = null."""
+
+_UNIT_ALIASES = {
+    "г": "г",
+    "гр": "г",
+    "грамм": "г",
+    "грамма": "г",
+    "граммов": "г",
+    "g": "г",
+    "мл": "мл",
+    "миллилитр": "мл",
+    "миллилитра": "мл",
+    "миллилитров": "мл",
+    "ml": "мл",
+    "кг": "кг",
+    "килограмм": "кг",
+    "килограмма": "кг",
+    "kg": "кг",
+    "л": "л",
+    "литр": "л",
+    "литра": "л",
+    "литров": "л",
+    "l": "л",
+}
+
 
 @dataclass
 class ParsedItem:
     name: str
     quantity: Decimal | None
+    unit: str | None = None
+    kcal_per_100g: Decimal | None = None
 
 
 @dataclass
@@ -74,7 +126,39 @@ def _parse_quantity(value: object) -> Decimal | None:
     return qty
 
 
-def _parse_items(raw_items: object) -> tuple[list[ParsedItem], list[str]]:
+def _parse_kcal_per_100g(value: object) -> Decimal | None:
+    if value is None or value == "":
+        return None
+    try:
+        kcal = Decimal(str(value).replace(",", ".").strip())
+    except (InvalidOperation, TypeError, AttributeError):
+        return None
+    if kcal < 0 or kcal > 2000:
+        return None
+    return kcal
+
+
+def _normalize_consumption_qty_unit(
+    quantity: Decimal | None, unit_raw: object
+) -> tuple[Decimal | None, str | None]:
+    alias = str(unit_raw or "").strip().lower()
+    unit = _UNIT_ALIASES.get(alias)
+    if unit == "кг":
+        if quantity is not None:
+            quantity = quantity * Decimal(1000)
+        return quantity, "г"
+    if unit == "л":
+        if quantity is not None:
+            quantity = quantity * Decimal(1000)
+        return quantity, "мл"
+    if unit in CONSUMPTION_UNITS:
+        return quantity, unit
+    return quantity, None
+
+
+def _parse_items(
+    raw_items: object, *, consumption: bool = False
+) -> tuple[list[ParsedItem], list[str]]:
     items: list[ParsedItem] = []
     skipped: list[str] = []
     if not isinstance(raw_items, list) or not raw_items:
@@ -88,11 +172,30 @@ def _parse_items(raw_items: object) -> tuple[list[ParsedItem], list[str]]:
             skipped.append("позиция без названия")
             continue
         quantity = _parse_quantity(raw.get("quantity"))
-        items.append(ParsedItem(name=name, quantity=quantity))
+        unit: str | None = None
+        kcal_per_100g: Decimal | None = None
+        if consumption:
+            quantity, unit = _normalize_consumption_qty_unit(quantity, raw.get("unit"))
+            if unit is None:
+                skipped.append(f"{name}: единица не г/мл")
+                continue
+            kcal_per_100g = _parse_kcal_per_100g(
+                raw.get("kcal_per_100g", raw.get("calories_per_100g", raw.get("kcal", raw.get("calories"))))
+            )
+        items.append(
+            ParsedItem(
+                name=name,
+                quantity=quantity,
+                unit=unit,
+                kcal_per_100g=kcal_per_100g,
+            )
+        )
     return items, skipped
 
 
-def parsed_from_model_content(content: str) -> ParsedInventory:
+def parsed_from_model_content(
+    content: str, *, consumption: bool = False
+) -> ParsedInventory:
     try:
         data = _extract_json(content)
     except ParseError:
@@ -101,7 +204,7 @@ def parsed_from_model_content(content: str) -> ParsedInventory:
             items=[],
             skipped=["не удалось разобрать ответ модели"],
         )
-    items, skipped = _parse_items(data.get("items"))
+    items, skipped = _parse_items(data.get("items"), consumption=consumption)
     return ParsedInventory(
         entry_date=_parse_entry_date(data.get("entry_date")),
         items=items,
@@ -109,8 +212,7 @@ def parsed_from_model_content(content: str) -> ParsedInventory:
     )
 
 
-async def parse_inventory_text(transcript: str) -> ParsedInventory:
-    """Local Ollama / Qwen parser."""
+async def _parse_with_ollama(transcript: str, system_prompt: str) -> str:
     settings = get_settings()
     payload = {
         "model": settings.qwen_model,
@@ -118,7 +220,7 @@ async def parse_inventory_text(transcript: str) -> ParsedInventory:
         "keep_alive": settings.ollama_keep_alive,
         "format": "json",
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": transcript},
         ],
     }
@@ -129,8 +231,19 @@ async def parse_inventory_text(transcript: str) -> ParsedInventory:
         )
     if response.status_code != 200:
         raise ParseError(f"Ollama error {response.status_code}: {response.text}")
-    content = response.json().get("message", {}).get("content", "")
+    return response.json().get("message", {}).get("content", "") or ""
+
+
+async def parse_inventory_text(transcript: str) -> ParsedInventory:
+    """Local Ollama / Qwen parser for stock (catalog units)."""
+    content = await _parse_with_ollama(transcript, SYSTEM_PROMPT)
     return parsed_from_model_content(content)
+
+
+async def parse_consumption_text(transcript: str) -> ParsedInventory:
+    """Local parser for eaten food: any name, units г/мл."""
+    content = await _parse_with_ollama(transcript, CONSUMPTION_SYSTEM_PROMPT)
+    return parsed_from_model_content(content, consumption=True)
 
 
 async def parse_inventory_text_openai(transcript: str) -> ParsedInventory:

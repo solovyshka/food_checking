@@ -14,3 +14,6 @@ STORAGE_UNITS = frozenset(
         "палка",
     }
 )
+
+# Consumption ("съел"): grams or milliliters only.
+CONSUMPTION_UNITS = frozenset({"г", "мл"})

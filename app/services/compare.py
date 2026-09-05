@@ -18,6 +18,7 @@ from app.services.hideme_vpn import openai_vpn_session
 from app.services.inventory import PendingBatch, preview_parsed
 from app.services.parser import (
     ParseError,
+    parse_consumption_text,
     parse_inventory_text,
     parse_inventory_text_openai,
 )
@@ -52,11 +53,25 @@ def _format_preview_block(title: str, batch: PendingBatch) -> list[str]:
     lines = [f"*{title}*"]
     if batch.rows:
         lines.append("```")
-        lines.append(f"{'Продукт':<16} {'Кол-во':>8} {'Ед.':<10}")
-        lines.append("-" * 36)
-        for row in batch.rows:
-            qty = format(row.quantity.normalize(), "f")
-            lines.append(f"{row.product_name[:16]:<16} {qty:>8} {row.unit:<10}")
+        if batch.kind == "consumption":
+            lines.append(f"{'Продукт':<14} {'Кол-во':>7} {'Ед.':<4} {'ккал/100г':>9}")
+            lines.append("-" * 38)
+            for row in batch.rows:
+                qty = format(row.quantity.normalize(), "f")
+                kcal = (
+                    "—"
+                    if row.kcal_per_100g is None
+                    else format(row.kcal_per_100g.normalize(), "f")
+                )
+                lines.append(
+                    f"{row.product_name[:14]:<14} {qty:>7} {row.unit:<4} {kcal:>9}"
+                )
+        else:
+            lines.append(f"{'Продукт':<16} {'Кол-во':>8} {'Ед.':<10}")
+            lines.append("-" * 36)
+            for row in batch.rows:
+                qty = format(row.quantity.normalize(), "f")
+                lines.append(f"{row.product_name[:16]:<16} {qty:>8} {row.unit:<10}")
         lines.append("```")
     else:
         lines.append("_пустой результат_")
@@ -148,8 +163,8 @@ async def compare_from_text(
     recorded_at = datetime.now(MOSCOW)
     transcript = text.strip()
     preview_kind = "inventory" if kind == "inventory" else "consumption"
-
-    local_parsed = await parse_inventory_text(transcript)
+    parse = parse_consumption_text if kind == "consumption" else parse_inventory_text
+    local_parsed = await parse(transcript)
     local_preview = preview_parsed(
         local_parsed, transcript, kind=preview_kind, recorded_at=recorded_at
     )
@@ -210,7 +225,8 @@ async def compare_from_voice(
     openai_parse_error: str | None = None
 
     preview_kind = "inventory" if kind == "inventory" else "consumption"
-    local_task = asyncio.create_task(parse_inventory_text(parse_transcript))
+    parse = parse_consumption_text if kind == "consumption" else parse_inventory_text
+    local_task = asyncio.create_task(parse(parse_transcript))
     try:
         async with openai_vpn_session():
             if settings.has_openai:
