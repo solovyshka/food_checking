@@ -16,3 +16,4 @@ gigaam-src/
 *.wav
 *.ovpn
 .DS_Store
+var/reports/

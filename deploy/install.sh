@@ -37,10 +37,12 @@ cd "$APP_DIR"
 install -m 644 "$APP_DIR/deploy/systemd/food-whisper.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/systemd/food-api.service" /etc/systemd/system/
 install -m 644 "$APP_DIR/deploy/systemd/food-bot.service" /etc/systemd/system/
+install -m 644 "$APP_DIR/deploy/systemd/food-eat-bot.service" /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable food-whisper food-api food-bot
+systemctl enable food-whisper food-api food-bot food-eat-bot
 systemctl restart food-whisper food-api || true
-systemctl restart food-bot || true
+systemctl restart food-bot food-eat-bot || true
 
 echo "Install complete."
-echo "Edit $APP_DIR/.env then: systemctl restart food-bot food-api food-whisper"
+echo "Edit $APP_DIR/.env then: systemctl restart food-bot food-eat-bot food-api food-whisper"
+echo "Set TELEGRAM_BOT_TOKEN (inventory) and TELEGRAM_CONSUMPTION_BOT_TOKEN (calories)."

@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     telegram_bot_token: str = ""
+    # Separate bot for calories / «съел» (deferred Qwen parse).
+    telegram_consumption_bot_token: str = ""
     telegram_allowed_user_ids: str = ""
     database_url: str = "postgresql://food:changeme@127.0.0.1:5432/food_checking"
     whisper_url: str = "http://127.0.0.1:9000"
@@ -32,6 +34,9 @@ class Settings(BaseSettings):
     tz: str = "Europe/Moscow"
     app_host: str = "127.0.0.1"
     app_port: int = 8088
+    # Public base for static HTML reports (nginx /r/...)
+    public_base_url: str = "http://161.104.53.72"
+    reports_dir: str = "/opt/food_checking/var/reports"
 
     @property
     def has_openai(self) -> bool:

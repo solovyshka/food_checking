@@ -65,3 +65,40 @@ class ConsumptionEntry(Base):
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     product: Mapped[Product] = relationship(back_populates="consumption_entries")
+
+
+class ConsumptionTranscript(Base):
+    __tablename__ = "consumption_transcripts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="voice")
+    meal_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    telegram_message_id: Mapped[str | None] = mapped_column(String(64))
+    stt_backend: Mapped[str | None] = mapped_column(String(32))
+    parse_batch_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class InventoryTranscript(Base):
+    __tablename__ = "inventory_transcripts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="voice")
+    entry_date: Mapped[date] = mapped_column(Date, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    telegram_message_id: Mapped[str | None] = mapped_column(String(64))
+    stt_backend: Mapped[str | None] = mapped_column(String(32))
+    parse_batch_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

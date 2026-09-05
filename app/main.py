@@ -4,12 +4,18 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.services.inventory import (
     EntryKind,
+    PendingBatch,
     cancel_batch,
     confirm_batch,
     format_entries_list,
     format_pending_table,
     list_consumption,
     list_inventory,
+)
+from app.services.transcripts import (
+    TranscriptPreview,
+    finalize_parse,
+    format_transcript_preview,
 )
 from app.services.voice_pipeline import process_text_message, process_voice_message
 
@@ -21,7 +27,7 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-def _batch_response(batch) -> dict:
+def _batch_response(batch: PendingBatch) -> dict:
     return {
         "kind": batch.kind,
         "batch_id": batch.batch_id,
@@ -47,6 +53,31 @@ def _batch_response(batch) -> dict:
     }
 
 
+def _transcript_response(preview: TranscriptPreview) -> dict:
+    return {
+        "kind": "consumption",
+        "stage": "transcript_pending",
+        "transcript_id": preview.id,
+        "transcript": preview.text,
+        "source": preview.source,
+        "meal_type": preview.meal_type,
+        "entry_date": preview.entry_date.isoformat(),
+        "recorded_at": preview.recorded_at.isoformat(),
+        "stt_backend": preview.stt_backend,
+        "table": format_transcript_preview(preview),
+        "items": [],
+        "unknown_names": [],
+        "missing_quantity": [],
+        "skipped": [],
+    }
+
+
+def _process_response(result: PendingBatch | TranscriptPreview) -> dict:
+    if isinstance(result, TranscriptPreview):
+        return _transcript_response(result)
+    return _batch_response(result)
+
+
 @app.post("/api/voice/process")
 async def voice_process(
     file: UploadFile = File(...),
@@ -60,7 +91,7 @@ async def voice_process(
     if kind not in ("inventory", "consumption"):
         raise HTTPException(status_code=400, detail="kind must be inventory or consumption")
     try:
-        batch = await process_voice_message(
+        result = await process_voice_message(
             db=db,
             audio_bytes=audio,
             filename=file.filename or "voice.ogg",
@@ -69,7 +100,7 @@ async def voice_process(
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return _batch_response(batch)
+    return _process_response(result)
 
 
 @app.post("/api/text/process")
@@ -82,7 +113,7 @@ async def text_process(
     if kind not in ("inventory", "consumption"):
         raise HTTPException(status_code=400, detail="kind must be inventory or consumption")
     try:
-        batch = await process_text_message(
+        result = await process_text_message(
             db=db,
             text=text,
             telegram_message_id=telegram_message_id,
@@ -90,7 +121,7 @@ async def text_process(
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    return _batch_response(batch)
+    return _process_response(result)
 
 
 @app.get("/api/inventory")
@@ -167,7 +198,7 @@ def inventory_cancel(batch_id: str, db: Session = Depends(get_db)) -> dict:
 
 @app.post("/api/consumption/{batch_id}/confirm")
 def consumption_confirm(batch_id: str, db: Session = Depends(get_db)) -> dict:
-    count = confirm_batch(db, batch_id, kind="consumption")
+    count = finalize_parse(db, batch_id, confirm=True)
     if count == 0:
         raise HTTPException(status_code=404, detail="Pending batch not found")
     return {"kind": "consumption", "batch_id": batch_id, "confirmed": count}
@@ -175,7 +206,7 @@ def consumption_confirm(batch_id: str, db: Session = Depends(get_db)) -> dict:
 
 @app.post("/api/consumption/{batch_id}/cancel")
 def consumption_cancel(batch_id: str, db: Session = Depends(get_db)) -> dict:
-    count = cancel_batch(db, batch_id, kind="consumption")
+    count = finalize_parse(db, batch_id, confirm=False)
     if count == 0:
         raise HTTPException(status_code=404, detail="Pending batch not found")
     return {"kind": "consumption", "batch_id": batch_id, "cancelled": count}

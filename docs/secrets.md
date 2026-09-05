@@ -58,14 +58,14 @@ cd food_checking
 
 ```bash
 ssh brynn
-bash /opt/food_checking/deploy/secrets/apply-local.sh food_checking /opt/food_checking food-api food-bot
+bash /opt/food_checking/deploy/secrets/apply-local.sh food_checking /opt/food_checking food-api food-bot food-eat-bot
 ```
 
 Или с Mac после push:
 
 ```bash
 ./deploy/secrets/push.sh food_checking
-ssh brynn 'bash /opt/food_checking/deploy/secrets/apply-local.sh food_checking /opt/food_checking food-api food-bot'
+ssh brynn 'bash /opt/food_checking/deploy/secrets/apply-local.sh food_checking /opt/food_checking food-api food-bot food-eat-bot'
 ```
 
 ## Список проектов

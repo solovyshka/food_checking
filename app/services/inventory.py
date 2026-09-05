@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Literal
 from zoneinfo import ZoneInfo
 
+from prettytable import PrettyTable
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
@@ -391,26 +392,76 @@ def _fmt_kcal(value: Decimal | None) -> str:
     return format(value.normalize(), "f")
 
 
+def _wrap_pre(text: str) -> str:
+    return f"```\n{text}\n```"
+
+
+def _append_consumption_table(lines: list[str], rows: list[EntryRow], *, with_date: bool) -> None:
+    table = PrettyTable()
+    if with_date:
+        table.field_names = ["Дата", "Продукт", "Кол-во", "Ед.", "ккал/100г"]
+        table.align["Дата"] = "l"
+    else:
+        table.field_names = ["Продукт", "Кол-во", "Ед.", "ккал/100г"]
+    table.align["Продукт"] = "l"
+    table.align["Кол-во"] = "r"
+    table.align["Ед."] = "l"
+    table.align["ккал/100г"] = "r"
+    table.max_width["Продукт"] = 18
+    for row in rows:
+        qty = format(row.quantity.normalize(), "f")
+        kcal = _fmt_kcal(row.kcal_per_100g)
+        if with_date:
+            table.add_row(
+                [
+                    row.entry_date.strftime("%d.%m.%Y"),
+                    row.product_name,
+                    qty,
+                    row.unit,
+                    kcal,
+                ]
+            )
+        else:
+            table.add_row([row.product_name, qty, row.unit, kcal])
+    lines.append(_wrap_pre(table.get_string()))
+
+
+def _append_inventory_table(lines: list[str], rows: list[EntryRow], *, with_date: bool) -> None:
+    table = PrettyTable()
+    if with_date:
+        table.field_names = ["Дата", "Продукт", "Кол-во", "Ед."]
+        table.align["Дата"] = "l"
+    else:
+        table.field_names = ["Продукт", "Кол-во", "Ед."]
+    table.align["Продукт"] = "l"
+    table.align["Кол-во"] = "r"
+    table.align["Ед."] = "l"
+    table.max_width["Продукт"] = 18
+    for row in rows:
+        qty = format(row.quantity.normalize(), "f")
+        if with_date:
+            table.add_row(
+                [
+                    row.entry_date.strftime("%d.%m.%Y"),
+                    row.product_name,
+                    qty,
+                    row.unit,
+                ]
+            )
+        else:
+            table.add_row([row.product_name, qty, row.unit])
+    lines.append(_wrap_pre(table.get_string()))
+
+
 def format_pending_table(batch: PendingBatch) -> str:
     recorded = batch.recorded_at.astimezone(MOSCOW).strftime("%d.%m.%Y %H:%M")
     label = KIND_LABELS[batch.kind]
     lines = [f"Режим: {label}", f"Дата: {recorded}"]
     if batch.rows:
         if batch.kind == "consumption":
-            header = f"{'Продукт':<14} {'Кол-во':>7} {'Ед.':<4} {'ккал/100г':>9}"
-            lines.extend(["```", header, "-" * len(header)])
-            for row in batch.rows:
-                qty = format(row.quantity.normalize(), "f")
-                lines.append(
-                    f"{row.product_name[:14]:<14} {qty:>7} {row.unit:<4} {_fmt_kcal(row.kcal_per_100g):>9}"
-                )
+            _append_consumption_table(lines, batch.rows, with_date=False)
         else:
-            header = f"{'Продукт':<16} {'Кол-во':>8} {'Ед.':<12}"
-            lines.extend(["```", header, "-" * 40])
-            for row in batch.rows:
-                qty = format(row.quantity.normalize(), "f")
-                lines.append(f"{row.product_name[:16]:<16} {qty:>8} {row.unit:<12}")
-        lines.append("```")
+            _append_inventory_table(lines, batch.rows, with_date=False)
     if batch.unknown_names:
         lines.append(f"Нет в справочнике (не сохранено): {', '.join(batch.unknown_names)}")
     if batch.missing_quantity:
@@ -427,28 +478,14 @@ def format_entries_list(rows: list[EntryRow], kind: EntryKind = "inventory") -> 
     label = KIND_LABELS[kind]
     if not rows:
         return f"Нет подтверждённых записей ({label})."
+    lines = [f"{label}:"]
+    shown = rows[:50]
     if kind == "consumption":
-        header = f"{'Дата':<11} {'Продукт':<14} {'Кол-во':>7} {'Ед.':<4} {'ккал/100г':>9}"
-        lines = [f"{label}:", "```", header, "-" * len(header)]
-        for row in rows[:50]:
-            qty = format(row.quantity.normalize(), "f")
-            lines.append(
-                f"{row.entry_date.strftime('%d.%m.%Y'):<11} {row.product_name[:14]:<14} {qty:>7} {row.unit:<4} {_fmt_kcal(row.kcal_per_100g):>9}"
-            )
-        lines.append("```")
-        return "\n".join(lines)
-    lines = [
-        f"{label}:",
-        "```",
-        f"{'Дата':<12} {'Продукт':<16} {'Кол-во':>8} {'Ед.':<8}",
-        "-" * 48,
-    ]
-    for row in rows[:50]:
-        qty = format(row.quantity.normalize(), "f")
-        lines.append(
-            f"{row.entry_date.strftime('%d.%m.%Y'):<12} {row.product_name[:16]:<16} {qty:>8} {row.unit:<8}"
-        )
-    lines.append("```")
+        _append_consumption_table(lines, shown, with_date=True)
+    else:
+        _append_inventory_table(lines, shown, with_date=True)
+    if len(rows) > 50:
+        lines.append(f"…и ещё {len(rows) - 50}")
     return "\n".join(lines)
 
 
