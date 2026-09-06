@@ -8,7 +8,7 @@
 
 | Бот | Процесс | Токен | Задача |
 |-----|---------|-------|--------|
-| Наличие | `food-bot` → `python -m app.bot.inventory` | `TELEGRAM_BOT_TOKEN` | Что есть дома (голос → сразу Qwen) |
+| Наличие | `food-bot` → `python -m app.bot.inventory` | `TELEGRAM_BOT_TOKEN` | Голос → Sheets → кнопка в БД |
 | Калории / «съел» | `food-eat-bot` → `python -m app.bot.consumption` | `TELEGRAM_CONSUMPTION_BOT_TOKEN` | Съеденное (текст в очередь → Qwen по периоду) |
 
 Боты ходят в Postgres и сервисы **напрямую** (не через `food-api`). FastAPI — параллельный HTTP-интерфейс.
@@ -50,15 +50,19 @@ STT / LLM (localhost only):
 
 ## Потоки данных
 
-### Наличие (deferred)
+### Наличие (Sheets)
 
 ```text
 голос → STT → inventory_transcripts (pending)
   → пользователь подтверждает текст (queued)
   → «Разобрать транскрибации» по дню
-  → один вызов Qwen → pending inventory_entries
-  → Подтвердить / Отменить (HTML-отчёт)
+  → один вызов Qwen → HTML-превью
+  → вкладка Sheets «Предложение» (+ «Текущее» из БД)
+  → правки вручную в Sheets
+  → «Добавить в БД» → новый confirmed-снимок на сегодня
 ```
+
+См. `docs/google-sheets.md`.
 
 ### Съел (deferred)
 

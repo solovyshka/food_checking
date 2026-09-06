@@ -10,6 +10,7 @@
 ├── README
 ├── food_checking/
 │   └── .env                     # chmod 600
+│   └── google-sa.json           # optional, Google Sheets SA key
 ├── trading_base_machine/
 │   └── .env
 └── dailybot/

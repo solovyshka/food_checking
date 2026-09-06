@@ -9,11 +9,11 @@ from typing import Literal
 from zoneinfo import ZoneInfo
 
 from prettytable import PrettyTable
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.catalog.products import CatalogProduct, lookup_product
-from app.catalog.units import CONSUMPTION_UNITS
+from app.catalog.units import CONSUMPTION_UNITS, STORAGE_UNITS
 from app.db.models import ConsumptionEntry, InventoryEntry, Product
 from app.services.parser import ParsedInventory
 
@@ -379,11 +379,138 @@ def list_entries(
 
 
 def list_inventory(db: Session, status: str | None = "confirmed") -> list[EntryRow]:
-    return list_entries(db, kind="inventory", status=status)
+    """Return confirmed (or filtered) stock for the latest entry_date only."""
+    stmt = select(func.max(InventoryEntry.entry_date))
+    if status:
+        stmt = stmt.where(InventoryEntry.status == status)
+    latest = db.scalar(stmt)
+    if latest is None:
+        return []
+    model = InventoryEntry
+    q = select(model).options(joinedload(model.product)).where(model.entry_date == latest)
+    if status:
+        q = q.where(model.status == status)
+    q = q.order_by(model.recorded_at.desc(), model.id.desc())
+    entries = db.scalars(q).all()
+    return [
+        EntryRow(
+            id=entry.id,
+            product_name=entry.product.name,
+            quantity=entry.quantity,
+            unit=entry.unit,
+            status=entry.status,
+            entry_date=entry.entry_date,
+            recorded_at=entry.recorded_at,
+            kcal_per_100g=getattr(entry, "kcal_per_100g", None),
+        )
+        for entry in entries
+    ]
 
 
 def list_consumption(db: Session, status: str | None = "confirmed") -> list[EntryRow]:
     return list_entries(db, kind="consumption", status=status)
+
+
+def import_inventory_from_rows(
+    db: Session,
+    items: list[tuple[str, Decimal, str]],
+    *,
+    entry_date: date | None = None,
+    source: str = "sheets",
+    transcript: str = "",
+) -> tuple[str, list[EntryRow]]:
+    """Write a new confirmed inventory snapshot for entry_date (default: today MSK)."""
+    now = datetime.now(MOSCOW)
+    day = entry_date or now.date()
+    batch_id = str(uuid.uuid4())
+    written: list[EntryRow] = []
+    for name, quantity, unit in items:
+        unit_norm = unit.strip().lower()
+        catalog = lookup_product(name)
+        if catalog:
+            product = get_or_create_product(db, catalog)
+            unit_norm = product.unit
+        else:
+            if unit_norm not in STORAGE_UNITS:
+                raise ValueError(f"Неизвестная единица «{unit}» для «{name}»")
+            product = get_or_create_named_product(db, name, unit_norm)
+        entry = InventoryEntry(
+            product_id=product.id,
+            quantity=quantity,
+            unit=unit_norm,
+            status="confirmed",
+            source=source,
+            transcript=transcript or None,
+            telegram_message_id=None,
+            batch_id=batch_id,
+            recorded_at=now,
+            entry_date=day,
+            confirmed_at=now,
+        )
+        db.add(entry)
+        db.flush()
+        written.append(
+            EntryRow(
+                id=entry.id,
+                product_name=product.name,
+                quantity=entry.quantity,
+                unit=entry.unit,
+                status=entry.status,
+                entry_date=entry.entry_date,
+                recorded_at=entry.recorded_at,
+            )
+        )
+    db.commit()
+    return batch_id, written
+
+
+def _resolve_inventory_item(
+    name: str, quantity: Decimal, unit: str
+) -> tuple[str, str, Decimal, str]:
+    """Return (merge_key, display_name, quantity, unit)."""
+    catalog = lookup_product(name)
+    if catalog:
+        return normalize_name(catalog.name), catalog.name, quantity, catalog.unit
+    unit_norm = unit.strip().lower()
+    if unit_norm not in STORAGE_UNITS:
+        raise ValueError(f"Неизвестная единица «{unit}» для «{name}»")
+    return normalize_name(name.strip()), name.strip(), quantity, unit_norm
+
+
+def merge_inventory_with_proposal(
+    db: Session,
+    proposal: list[tuple[str, Decimal, str]],
+    *,
+    entry_date: date | None = None,
+    source: str = "sheets_merge",
+) -> tuple[str, list[EntryRow], int, int]:
+    """Merge proposal into latest confirmed stock: add new, overwrite overlaps.
+
+    Returns (batch_id, written_rows, added_count, updated_count).
+    """
+    current = list_inventory(db, status="confirmed")
+    merged: dict[str, tuple[str, Decimal, str]] = {}
+    for row in current:
+        key, display, qty, unit = _resolve_inventory_item(
+            row.product_name, row.quantity, row.unit
+        )
+        merged[key] = (display, qty, unit)
+
+    added = 0
+    updated = 0
+    for name, quantity, unit in proposal:
+        key, display, qty, unit_norm = _resolve_inventory_item(name, quantity, unit)
+        if key in merged:
+            updated += 1
+        else:
+            added += 1
+        merged[key] = (display, qty, unit_norm)
+
+    items = [(display, qty, unit) for display, qty, unit in merged.values()]
+    batch_id, written = import_inventory_from_rows(
+        db, items, entry_date=entry_date, source=source
+    )
+    return batch_id, written, added, updated
 
 
 def _fmt_kcal(value: Decimal | None) -> str:
@@ -478,12 +605,15 @@ def format_entries_list(rows: list[EntryRow], kind: EntryKind = "inventory") -> 
     label = KIND_LABELS[kind]
     if not rows:
         return f"Нет подтверждённых записей ({label})."
-    lines = [f"{label}:"]
-    shown = rows[:50]
-    if kind == "consumption":
-        _append_consumption_table(lines, shown, with_date=True)
+    if kind == "inventory":
+        day = rows[0].entry_date.strftime("%d.%m.%Y")
+        lines = [f"{label} на {day}:"]
+        shown = rows[:50]
+        _append_inventory_table(lines, shown, with_date=False)
     else:
-        _append_inventory_table(lines, shown, with_date=True)
+        lines = [f"{label}:"]
+        shown = rows[:50]
+        _append_consumption_table(lines, shown, with_date=True)
     if len(rows) > 50:
         lines.append(f"…и ещё {len(rows) - 50}")
     return "\n".join(lines)

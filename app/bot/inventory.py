@@ -1,4 +1,4 @@
-"""Inventory Telegram bot — deferred STT confirm, then batch Qwen parse."""
+"""Inventory Telegram bot — STT queue → Qwen → Google Sheets; merge/replace into DB."""
 
 from __future__ import annotations
 
@@ -22,19 +22,26 @@ from aiogram.types import (
 from app.bot.common import is_allowed, make_bot
 from app.config import get_settings
 from app.db.session import SessionLocal
+from app.services.google_sheets import (
+    GoogleSheetsError,
+    current_sheet_url,
+    export_current_inventory,
+    export_proposal,
+    proposal_sheet_url,
+    read_proposal,
+)
 from app.services.inventory import (
     KIND_LABELS,
     PendingBatch,
-    format_entries_list,
-    format_pending_table,
+    import_inventory_from_rows,
     list_inventory,
+    merge_inventory_with_proposal,
 )
-from app.services.reports import ReportFile, report_entries_list, report_pending_batch
+from app.services.reports import ReportFile, report_pending_batch
 from app.services.transcripts import (
     TranscriptPreview,
     cancel_inventory_transcript,
     confirm_inventory_transcript,
-    finalize_inventory_parse,
     format_transcript_preview,
     list_queued_inventory_days,
     parse_inventory_day,
@@ -50,7 +57,11 @@ _bot = None
 
 BTN_LIST_STOCK = "Список наличия"
 BTN_PARSE_TX = "Разобрать транскрибации"
-ALL_BUTTONS = frozenset({BTN_LIST_STOCK, BTN_PARSE_TX})
+BTN_ADD_PROPOSAL = "Добавить предложение"
+BTN_FULL_UPDATE = "Обновить полностью"
+ALL_BUTTONS = frozenset(
+    {BTN_LIST_STOCK, BTN_PARSE_TX, BTN_ADD_PROPOSAL, BTN_FULL_UPDATE}
+)
 
 
 def get_bot():
@@ -65,6 +76,8 @@ def keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=BTN_LIST_STOCK)],
             [KeyboardButton(text=BTN_PARSE_TX)],
+            [KeyboardButton(text=BTN_ADD_PROPOSAL)],
+            [KeyboardButton(text=BTN_FULL_UPDATE)],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -74,11 +87,14 @@ def keyboard() -> ReplyKeyboardMarkup:
 def help_text() -> str:
     return (
         f"Бот *наличия* (*{KIND_LABELS['inventory']}*).\n\n"
-        "Голос → подтверждаете распознанный текст.\n"
-        "Тексты копятся по дню; "
-        f"*{BTN_PARSE_TX}* — Qwen разбирает все тексты выбранного дня.\n\n"
-        f"• *{BTN_LIST_STOCK}* — список наличия\n"
-        f"• *{BTN_PARSE_TX}* — разобрать очередь\n\n"
+        "Голос → подтверждаете текст → очередь.\n"
+        f"*{BTN_PARSE_TX}* — Qwen → вкладка «Предложение» в Sheets.\n"
+        f"*{BTN_ADD_PROPOSAL}* — новые строки + перезапись пересечений.\n"
+        f"*{BTN_FULL_UPDATE}* — наличие = только «Предложение».\n\n"
+        f"• *{BTN_LIST_STOCK}* — ссылка на вкладку наличия\n"
+        f"• *{BTN_PARSE_TX}* — разбор → ссылка на предложение\n"
+        f"• *{BTN_ADD_PROPOSAL}* — merge из предложения\n"
+        f"• *{BTN_FULL_UPDATE}* — полная замена из предложения\n\n"
         "Калории / «съел» — в отдельном боте."
     )
 
@@ -94,23 +110,6 @@ def _transcript_keyboard(transcript_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="Отменить",
                     callback_data=f"txcancel:{transcript_id}",
-                ),
-            ]
-        ]
-    )
-
-
-def _confirm_keyboard(batch_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Подтвердить",
-                    callback_data=f"confirm:inv:{batch_id}",
-                ),
-                InlineKeyboardButton(
-                    text="Отменить",
-                    callback_data=f"cancel:inv:{batch_id}",
                 ),
             ]
         ]
@@ -138,7 +137,6 @@ async def _send_html_report(
     caption: str,
     *,
     status_msg: Message | None = None,
-    reply_markup: InlineKeyboardMarkup | None = None,
 ) -> None:
     if status_msg is not None:
         try:
@@ -146,37 +144,62 @@ async def _send_html_report(
         except Exception:
             pass
     doc = FSInputFile(report.path, filename=report.filename)
-    await message.answer_document(
-        document=doc,
-        caption=caption,
-        reply_markup=reply_markup,
+    await message.answer_document(document=doc, caption=caption)
+
+
+def _sync_sheets_after_parse(batch: PendingBatch) -> str:
+    with SessionLocal() as db:
+        current = list_inventory(db, status="confirmed")
+    export_proposal(
+        batch.rows,
+        transcript=batch.transcript,
+        unknown_names=batch.unknown_names,
+        missing_quantity=batch.missing_quantity,
+        skipped=batch.skipped,
     )
+    export_current_inventory(current)
+    return proposal_sheet_url()
 
 
-async def _send_pending(
+async def _send_parse_result(
     message: Message, batch: PendingBatch, status_msg: Message | None = None
 ) -> None:
+    prop_url = ""
+    sheets_err = ""
+    try:
+        prop_url = _sync_sheets_after_parse(batch)
+    except GoogleSheetsError as exc:
+        sheets_err = f"Sheets: {exc}"
+        logger.warning("Sheets export failed: %s", exc)
+    except Exception as exc:
+        sheets_err = f"Sheets ошибка: {exc}"
+        logger.exception("Sheets export failed")
+
+    lines = [
+        f"Разбор готов: {len(batch.rows)} поз.",
+        "Правьте «Предложение», затем «Добавить предложение» или «Обновить полностью».",
+    ]
+    if prop_url:
+        lines.append(f"Предложение:\n{prop_url}")
+    if sheets_err:
+        lines.append(sheets_err)
+    if batch.unknown_names:
+        lines.append("Нет в справочнике: " + ", ".join(batch.unknown_names))
+    text = "\n".join(lines)
+
     report = report_pending_batch(batch)
-    markup = _confirm_keyboard(batch.batch_id) if batch.batch_id else None
     if report:
-        caption = (
-            f"Режим: {KIND_LABELS['inventory']}\n"
-            f"Позиций: {len(batch.rows)}\n"
-            f"Открой файл или ссылку:\n{report.url}"
-        )
         await _send_html_report(
             message,
             report,
-            caption,
+            caption=f"{text}\nHTML: {report.url}",
             status_msg=status_msg,
-            reply_markup=markup,
         )
         return
-    text = format_pending_table(batch)
     if status_msg is not None:
-        await status_msg.edit_text(text, reply_markup=markup)
+        await status_msg.edit_text(text)
     else:
-        await message.answer(text, reply_markup=markup)
+        await message.answer(text, reply_markup=keyboard())
 
 
 async def _send_transcript_preview(
@@ -208,10 +231,44 @@ async def _run_parse_day(
         if batch is None:
             await status_msg.edit_text(f"Нет неразобранных текстов за {label}.")
             return
-        await _send_pending(message, batch, status_msg=status_msg)
+        await _send_parse_result(message, batch, status_msg=status_msg)
     except Exception as exc:
         logger.exception("Inventory day parse failed")
         await status_msg.edit_text(f"Ошибка разбора: {exc}")
+
+
+def _apply_from_proposal(*, mode: str) -> str:
+    """mode: merge | replace. Returns status text for Telegram."""
+    items = read_proposal()
+    if not items:
+        return "Во вкладке «Предложение» нет строк с продуктом, кол-вом и единицей."
+    payload = [(i.product_name, i.quantity, i.unit) for i in items]
+    with SessionLocal() as db:
+        if mode == "merge":
+            batch_id, written, added, updated = merge_inventory_with_proposal(
+                db, payload, source="sheets_merge"
+            )
+            detail = f"добавлено {added}, обновлено {updated}, всего {len(written)}"
+        else:
+            batch_id, written = import_inventory_from_rows(
+                db, payload, source="sheets_replace"
+            )
+            detail = f"полностью {len(written)} поз. (только из предложения)"
+        current = list_inventory(db, status="confirmed")
+    try:
+        export_current_inventory(current)
+        url = current_sheet_url()
+    except Exception:
+        logger.exception("Sheets refresh after import failed")
+        url = ""
+    day = written[0].entry_date.strftime("%d.%m.%Y")
+    lines = [
+        f"Наличие на {day}: {detail}.",
+        f"batch={batch_id[:8]}…",
+    ]
+    if url:
+        lines.append(f"Наличие:\n{url}")
+    return "\n".join(lines)
 
 
 @dp.message(Command("start", "help", "mode"))
@@ -232,24 +289,61 @@ async def cmd_inventory(message: Message) -> None:
         return
     with SessionLocal() as db:
         rows = list_inventory(db, status="confirmed")
-    if not rows:
+    try:
+        if rows:
+            export_current_inventory(rows)
+        url = current_sheet_url()
+        if not rows:
+            await message.answer(
+                "Нет подтверждённого наличия в БД.\n"
+                + (f"Таблица:\n{url}" if url else "Sheets не настроен."),
+                reply_markup=keyboard(),
+            )
+            return
+        day = rows[0].entry_date.strftime("%d.%m.%Y")
         await message.answer(
-            format_entries_list(rows, kind="inventory"),
+            f"Наличие на {day}: {len(rows)} поз.\n{url}",
             reply_markup=keyboard(),
         )
+    except GoogleSheetsError as exc:
+        await message.answer(f"Sheets: {exc}", reply_markup=keyboard())
+    except Exception as exc:
+        logger.exception("List stock / Sheets failed")
+        await message.answer(f"Ошибка: {exc}", reply_markup=keyboard())
+
+
+@dp.message(F.text == BTN_ADD_PROPOSAL)
+async def cmd_add_proposal(message: Message) -> None:
+    if not is_allowed(message.from_user.id if message.from_user else None):
         return
-    report = report_entries_list(rows, kind="inventory")
-    if report:
-        await _send_html_report(
-            message,
-            report,
-            caption=f"Наличие: {len(rows)} записей.\n{report.url}",
-        )
+    status = await message.answer("Merge из «Предложение»...")
+    try:
+        text = _apply_from_proposal(mode="merge")
+        await status.edit_text(text)
+    except GoogleSheetsError as exc:
+        await status.edit_text(f"Sheets: {exc}")
+    except ValueError as exc:
+        await status.edit_text(f"Не удалось импортировать: {exc}")
+    except Exception as exc:
+        logger.exception("Merge from Sheets failed")
+        await status.edit_text(f"Ошибка: {exc}")
+
+
+@dp.message(F.text == BTN_FULL_UPDATE)
+async def cmd_full_update(message: Message) -> None:
+    if not is_allowed(message.from_user.id if message.from_user else None):
         return
-    await message.answer(
-        format_entries_list(rows, kind="inventory"),
-        reply_markup=keyboard(),
-    )
+    status = await message.answer("Полная замена из «Предложение»...")
+    try:
+        text = _apply_from_proposal(mode="replace")
+        await status.edit_text(text)
+    except GoogleSheetsError as exc:
+        await status.edit_text(f"Sheets: {exc}")
+    except ValueError as exc:
+        await status.edit_text(f"Не удалось импортировать: {exc}")
+    except Exception as exc:
+        logger.exception("Full replace from Sheets failed")
+        await status.edit_text(f"Ошибка: {exc}")
 
 
 @dp.message(F.text == BTN_PARSE_TX)
@@ -269,9 +363,7 @@ async def on_parse_transcripts(message: Message) -> None:
         return
     lines = ["Выберите день для разбора:"]
     for day in days:
-        lines.append(
-            f"• {day.entry_date.strftime('%d.%m.%Y')} ({day.count})"
-        )
+        lines.append(f"• {day.entry_date.strftime('%d.%m.%Y')} ({day.count})")
     await message.answer(
         "\n".join(lines),
         reply_markup=_days_keyboard(days),
@@ -315,7 +407,7 @@ async def handle_voice(message: Message) -> None:
         if isinstance(result, TranscriptPreview):
             await _send_transcript_preview(message, result, status_msg=status_msg)
         else:
-            await _send_pending(message, result, status_msg=status_msg)
+            await _send_parse_result(message, result, status_msg=status_msg)
     except Exception as exc:
         logger.exception("Voice processing failed")
         await status_msg.edit_text(f"Ошибка обработки: {exc}")
@@ -401,49 +493,6 @@ async def on_parse_day(callback: CallbackQuery) -> None:
             entry_date,
             status_msg=callback.message,
         )
-
-
-@dp.callback_query(F.data.startswith("confirm:inv:"))
-async def on_confirm(callback: CallbackQuery) -> None:
-    if not is_allowed(callback.from_user.id if callback.from_user else None):
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-    batch_id = (callback.data or "").split(":", 2)[-1]
-    with SessionLocal() as db:
-        count = finalize_inventory_parse(db, batch_id, confirm=True)
-    if count == 0:
-        await callback.answer("Запись уже обработана", show_alert=True)
-        return
-    await callback.answer("Сохранено")
-    if callback.message:
-        try:
-            await callback.message.edit_caption(
-                caption=f"{KIND_LABELS['inventory']}: подтверждено ({count} поз.)."
-            )
-        except Exception:
-            await callback.message.edit_text(
-                f"{KIND_LABELS['inventory']}: подтверждено ({count} поз.)."
-            )
-
-
-@dp.callback_query(F.data.startswith("cancel:inv:"))
-async def on_cancel(callback: CallbackQuery) -> None:
-    if not is_allowed(callback.from_user.id if callback.from_user else None):
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-    batch_id = (callback.data or "").split(":", 2)[-1]
-    with SessionLocal() as db:
-        count = finalize_inventory_parse(db, batch_id, confirm=False)
-    if count == 0:
-        await callback.answer("Запись уже обработана", show_alert=True)
-        return
-    await callback.answer("Отменено")
-    if callback.message:
-        text = f"{KIND_LABELS['inventory']}: разбор отменён, тексты снова в очереди."
-        try:
-            await callback.message.edit_caption(caption=text)
-        except Exception:
-            await callback.message.edit_text(text)
 
 
 async def main() -> None:

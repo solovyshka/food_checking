@@ -20,7 +20,7 @@
 
 ## Потоки
 
-**Наличие:** голос → STT → сразу Qwen → таблица → Подтвердить/Отменить → `inventory_entries`.
+**Наличие:** голос → STT → очередь → **Разобрать** → Qwen → Google Sheets («Предложение» + «Текущее») + HTML → правки в Sheets → **Добавить в БД** (новый снимок). См. [docs/google-sheets.md](docs/google-sheets.md).
 
 **Съел:** голос/текст → подтверждение текста → очередь `consumption_transcripts` по периоду (дата + завтрак/обед/ужин/перекус) → кнопка **Разобрать транскрибации** → один прогон Qwen → `consumption_entries` (г/мл, опционально ккал/100г).
 
@@ -54,6 +54,7 @@ ssh root@161.104.53.72 'bash /opt/food_checking/deploy/install.sh'
 - `TELEGRAM_BOT_TOKEN` — наличие  
 - `TELEGRAM_CONSUMPTION_BOT_TOKEN` — калории  
 - `TELEGRAM_ALLOWED_USER_IDS`  
+- `GOOGLE_SHEETS_SPREADSHEET_ID`, `GOOGLE_SERVICE_ACCOUNT_FILE` — наличие ↔ Sheets ([docs/google-sheets.md](docs/google-sheets.md))  
 - `DATABASE_URL`, STT/Ollama ключи — см. `.env.example`
 
 ```bash

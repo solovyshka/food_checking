@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Literal
@@ -9,7 +10,13 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db.models import ConsumptionTranscript, InventoryTranscript
-from app.services.inventory import PendingBatch, cancel_batch, confirm_batch, create_pending_entries
+from app.services.inventory import (
+    PendingBatch,
+    cancel_batch,
+    confirm_batch,
+    create_pending_entries,
+    preview_parsed,
+)
 from app.services.parser import parse_consumption_text, parse_inventory_text
 
 MOSCOW = ZoneInfo("Europe/Moscow")
@@ -391,6 +398,11 @@ async def parse_inventory_day(
     db: Session,
     entry_date: date,
 ) -> PendingBatch | None:
+    """Parse queued transcripts for a day into a preview batch (no pending DB rows).
+
+    Transcripts are marked parsed immediately; the proposal is written to Google Sheets
+    by the bot. Confirmed inventory is imported later via «Добавить в БД».
+    """
     entries = list_queued_inventory_for_day(db, entry_date)
     if not entries:
         return None
@@ -400,24 +412,24 @@ async def parse_inventory_day(
     parsed.entry_date = entry_date
 
     recorded_at = entries[-1].recorded_at
-    batch = create_pending_entries(
-        db=db,
+    batch = preview_parsed(
         parsed=parsed,
         transcript=combined,
         kind="inventory",
         recorded_at=recorded_at,
-        telegram_message_id=None,
-        source="voice",
     )
-    if not batch.batch_id:
-        return batch
+    batch_id = str(uuid.uuid4())
+    batch.batch_id = batch_id
 
+    now = datetime.now(MOSCOW)
     for entry in entries:
-        entry.parse_batch_id = batch.batch_id
+        entry.parse_batch_id = batch_id
+        entry.status = "parsed"
+        entry.confirmed_at = entry.confirmed_at or now
     db.commit()
 
     day = entry_date.strftime("%d.%m.%Y")
-    note = f"День: {day} · записей {len(entries)}"
+    note = f"День: {day} · записей {len(entries)} · → Sheets"
     if ollama:
         note += f" · {ollama}"
     batch.timing_note = (
@@ -427,6 +439,7 @@ async def parse_inventory_day(
 
 
 def finalize_inventory_parse(db: Session, batch_id: str, *, confirm: bool) -> int:
+    """Legacy confirm/cancel for pending inventory batches (API / old UI)."""
     if confirm:
         count = confirm_batch(db, batch_id, kind="inventory")
         if count == 0:

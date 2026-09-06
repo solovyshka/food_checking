@@ -178,17 +178,21 @@ def report_entries_list(rows: list[EntryRow], kind: str) -> ReportFile | None:
         return None
     label = KIND_LABELS[kind]
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
-    table = (
-        _consumption_table(rows[:200], with_date=True)
-        if kind == "consumption"
-        else _inventory_table(rows[:200], with_date=True)
-    )
+    if kind == "consumption":
+        table = _consumption_table(rows[:200], with_date=True)
+        title = label
+        meta = f"Сформировано {now} · записей: {min(len(rows), 200)}"
+    else:
+        day = rows[0].entry_date.strftime("%d.%m.%Y")
+        table = _inventory_table(rows[:200], with_date=False)
+        title = f"{label} на {day}"
+        meta = f"Сформировано {now} · записей: {min(len(rows), 200)}"
     notes = []
     if len(rows) > 200:
         notes.append(f"Показаны первые 200 из {len(rows)} записей.")
     html_doc = _page(
-        title=label,
-        meta=f"Сформировано {now} · записей: {min(len(rows), 200)}",
+        title=title,
+        meta=meta,
         table_html=table,
         notes=notes,
     )

@@ -37,10 +37,19 @@ class Settings(BaseSettings):
     # Public base for static HTML reports (nginx /r/...)
     public_base_url: str = "http://161.104.53.72"
     reports_dir: str = "/opt/food_checking/var/reports"
+    # Google Sheets for inventory draft / current snapshot
+    google_sheets_spreadsheet_id: str = ""
+    google_service_account_file: str = "/opt/secrets/food_checking/google-sa.json"
+    google_sheets_tab_current: str = "Текущее"
+    google_sheets_tab_proposal: str = "Предложение"
 
     @property
     def has_openai(self) -> bool:
         return bool(self.openai_api_key.strip())
+
+    @property
+    def has_google_sheets(self) -> bool:
+        return bool(self.google_sheets_spreadsheet_id.strip())
 
     @property
     def allowed_user_ids(self) -> set[int]:
