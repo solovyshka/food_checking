@@ -1,6 +1,7 @@
 [Unit]
 Description=Food Checking Consumption Telegram Bot
-After=network.target postgresql.service
+After=network.target postgresql.service ovh-telegram-proxy.service
+Wants=ovh-telegram-proxy.service
 
 [Service]
 Type=simple

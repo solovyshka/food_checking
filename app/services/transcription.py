@@ -126,9 +126,14 @@ async def transcribe_for_pipeline(
     try:
         text, detail = await transcribe_audio_gigaam(audio_bytes, filename=filename)
         return text, "gigaam", detail
-    except TranscriptionError:
+    except TranscriptionError as gigaam_err:
+        logger.warning("GigaAM failed: %s", gigaam_err)
         if not settings.gigaam_enabled:
             text = await transcribe_audio(audio_bytes, filename=filename)
             return text, "whisper", ""
-        text = await transcribe_audio(audio_bytes, filename=filename)
-        return text, "whisper-fallback", ""
+        try:
+            text = await transcribe_audio(audio_bytes, filename=filename)
+            return text, "whisper-fallback", ""
+        except Exception as whisper_err:
+            logger.warning("Whisper fallback unavailable: %s", whisper_err)
+            raise TranscriptionError(str(gigaam_err)) from gigaam_err

@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     # Separate bot for calories / «съел» (deferred Qwen parse).
     telegram_consumption_bot_token: str = ""
     telegram_allowed_user_ids: str = ""
+    # Optional HTTP(S) proxy for Telegram API (e.g. http://127.0.0.1:8888 via OVH tunnel).
+    telegram_proxy_url: str = ""
     database_url: str = "postgresql://food:changeme@127.0.0.1:5432/food_checking"
     whisper_url: str = "http://127.0.0.1:9000"
     whisper_model: str = "small"
