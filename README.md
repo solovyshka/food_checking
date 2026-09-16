@@ -74,7 +74,7 @@ systemctl status food-gigaam food-whisper food-api food-bot food-eat-bot
 
 ## OpenAI / VPN (опционально)
 
-Не используется основными ботами. Скрипт split-VPN и клиент остаются для экспериментов (`deploy/vpn/hideme-openai.sh`, `app/services/compare.py`). OVPN только на сервере в `/opt/secrets/food_checking/vpn/`.
+Не используется основными ботами. Скрипт split-VPN и клиент остаются для экспериментов (`deploy/vpn/hideme-openai.sh`, `app/services/compare.py`). OVPN в общем vault: `/opt/secrets/vpn/`.
 
 ## Секреты
 

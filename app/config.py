@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     voice_stt_backend: str = "gigaam"
     hideme_vpn_enabled: bool = True
     hideme_vpn_script: str = "/opt/food_checking/deploy/vpn/hideme-openai.sh"
-    hideme_ovpn_conf: str = "/opt/secrets/food_checking/vpn/netherlands-split.ovpn"
+    hideme_ovpn_conf: str = "/opt/secrets/vpn/netherlands-split.ovpn"
     tz: str = "Europe/Moscow"
     app_host: str = "127.0.0.1"
     app_port: int = 8088

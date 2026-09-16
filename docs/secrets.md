@@ -8,8 +8,11 @@
 ```text
 /opt/secrets/                    # chmod 700
 ├── README
+├── vpn/                         # shared OVPN + one-shot helpers (все проекты)
+│   ├── netherlands-split.ovpn
+│   └── …
 ├── food_checking/
-│   └── .env                     # chmod 600
+│   ├── .env                     # chmod 600
 │   └── google-sa.json           # optional, Google Sheets SA key
 ├── trading_base_machine/
 │   └── .env

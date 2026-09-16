@@ -8,7 +8,7 @@
 #   hideme-openai.sh status
 set -euo pipefail
 
-CONF="${HIDEME_OVPN_CONF:-/opt/secrets/food_checking/vpn/netherlands-split.ovpn}"
+CONF="${HIDEME_OVPN_CONF:-/opt/secrets/vpn/netherlands-split.ovpn}"
 LOG="${HIDEME_OVPN_LOG:-/tmp/hideme-openai-openvpn.log}"
 PIDFILE="${HIDEME_OVPN_PID:-/tmp/hideme-openai-openvpn.pid}"
 ROUTES_FILE="${HIDEME_OVPN_ROUTES:-/tmp/hideme-openai-routes.txt}"

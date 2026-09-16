@@ -10,10 +10,10 @@ ssh -o BatchMode=yes -o ConnectTimeout=15 "$HOST" "REMOTE_ROOT='$REMOTE_ROOT' ba
 set -euo pipefail
 mkdir -p "$REMOTE_ROOT"/food_checking \
          "$REMOTE_ROOT"/trading_base_machine \
-         "$REMOTE_ROOT"/dailybot
+         "$REMOTE_ROOT"/dailybot \
+         "$REMOTE_ROOT"/vpn
 chmod 700 "$REMOTE_ROOT"
 chmod 700 "$REMOTE_ROOT"/*
-
 if [[ -f /opt/food_checking/.env && ! -f "$REMOTE_ROOT/food_checking/.env" ]]; then
   cp /opt/food_checking/.env "$REMOTE_ROOT/food_checking/.env"
   echo "Seeded food_checking from /opt/food_checking/.env"
@@ -31,6 +31,7 @@ cat > "$REMOTE_ROOT/README" <<'NOTE'
 Private secrets vault. Not in git.
 Layout:
   /opt/secrets/<project>/.env
+  /opt/secrets/vpn/          # shared OVPN + helpers
 
 From a laptop:
   ./deploy/secrets/pull.sh food_checking
