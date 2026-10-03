@@ -7,6 +7,7 @@ from sqlalchemy import engine_from_config, pool
 
 from app.config import get_settings
 from app.db.models import Base
+from app.db import mobile_models  # Register mobile tables for migration metadata.
 
 config = context.config
 if config.config_file_name is not None:

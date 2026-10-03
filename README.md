@@ -89,3 +89,17 @@ ssh brynn 'bash /opt/food_checking/deploy/secrets/apply-local.sh food_checking /
 ## План (история)
 
 Ранний roadmap: [PLAN.md](PLAN.md). Актуальная архитектура — [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Android-приложение
+
+Собрана первая версия APK «Еда»: исходники и инструкция сборки в
+[mobile/README.md](mobile/README.md). Приложение хранит дневник в существующей
+базе на коробке, поддерживает текст и голос, проверку продуктов, приёмы пищи,
+расчёт калорий, редактирование и удаление. Мобильный API запускается отдельным
+сервисом `food-mobile-api` на `192.168.100.41:8092`.
+
+Установочный файл и инструкция подключения находятся в локальной папке
+`outputs/` (APK не хранится в Git). Публикация: `https://food-consumption.solovyshka.com/app/`,
+резервный вход: `https://vladislavsolovei.ru/food-consumption/app/`.
+Приложение работает через интернет и обновляется внутри приложения, как аудиогид.
+Подробности сборки и публикации: [deploy/public/README.md](deploy/public/README.md).

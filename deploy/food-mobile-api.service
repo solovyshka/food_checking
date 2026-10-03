@@ -1,0 +1,17 @@
+[Unit]
+Description=Food diary mobile API
+After=network-online.target postgresql.service
+
+[Service]
+User=solovyshka
+WorkingDirectory=/opt/food_checking/mobile-runtime
+EnvironmentFile=/opt/food_checking/.env
+EnvironmentFile=/opt/secrets/food_checking/mobile.env
+ExecStart=/opt/food_checking/venv/bin/uvicorn app.mobile_api:app --app-dir /opt/food_checking --host 192.168.100.41 --port 8092 --limit-concurrency 20
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

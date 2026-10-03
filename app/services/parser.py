@@ -32,11 +32,9 @@ CONSUMPTION_SYSTEM_PROMPT = """Ты извлекаешь съеденное из
 Жидкости (напитки, суп, молоко, сок) — мл. Всё остальное — г.
 Примеры порций: 2 яйца → 120 г; стакан молока → 200 мл; тарелка супа → 250 мл; кусок хлеба → 30 г; 0.5 кг курицы → 500 г.
 
-kcal_per_100g — опционально. Заполняй ТОЛЬКО если человек ЯВНО назвал калорийность.
-Не выдумывай калории из своих знаний, если не сказано — ставь null.
-Человек говорит просто «калорийность N калорий/ккал», БЕЗ «на 100 грамм». Это число и пиши в kcal_per_100g как есть, не пересчитывай на порцию.
-Пример: «съел 100 грамм творога 2% с калорийностью 100 калорий» → quantity 100, unit "г", kcal_per_100g 100.
-«борщ тарелка» без калорийности → kcal_per_100g null.
+kcal_per_100g — всегда число: типичная калорийность продукта на 100 г или 100 мл.
+Если человек сам назвал калории на 100 г — бери его число. Если назвал калории порции — пересчитай на 100 г.
+Если не назвал — оцени сам по обычным справочным значениям (творог 2% ~110, борщ ~45, яблоко ~50). null не ставь.
 
 Верни ТОЛЬКО валидный JSON без markdown:
 {
@@ -279,14 +277,7 @@ async def parse_inventory_text(transcript: str) -> tuple[ParsedInventory, str]:
     return parsed_from_model_content(content), detail
 
 
-async def parse_consumption_text(transcript: str) -> tuple[ParsedInventory, str]:
-    """Local parser for eaten food: any name, units г/мл."""
-    content, detail = await _parse_with_ollama(transcript, CONSUMPTION_SYSTEM_PROMPT)
-    return parsed_from_model_content(content, consumption=True), detail
-
-
-async def parse_inventory_text_openai(transcript: str) -> ParsedInventory:
-    """Cloud chat parser via OpenAI-compatible API (same JSON as local)."""
+async def _openai_chat(system_prompt: str, transcript: str) -> str:
     from app.services.openai_client import openai_auth_headers
 
     settings = get_settings()
@@ -297,18 +288,37 @@ async def parse_inventory_text_openai(transcript: str) -> ParsedInventory:
         "temperature": 0,
         "response_format": {"type": "json_object"},
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": transcript},
         ],
     }
     headers = openai_auth_headers(json_content=True)
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    proxy = (settings.telegram_proxy_url or "").strip() or None
+    t0 = time.perf_counter()
+    async with httpx.AsyncClient(timeout=120.0, proxy=proxy) as client:
         response = await client.post(
             f"{settings.openai_base_url.rstrip('/')}/chat/completions",
             headers=headers,
             json=payload,
         )
+    http_s = time.perf_counter() - t0
     if response.status_code != 200:
-        raise ParseError(f"Cloud parse error {response.status_code}: {response.text}")
+        raise ParseError(f"Cloud parse error {response.status_code}: {response.text[:400]}")
     content = response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
-    return parsed_from_model_content(content or "")
+    if not content:
+        raise ParseError("Cloud parse returned empty content")
+    logger.info("TIMING openai parse http=%.2fs model=%s", http_s, settings.openai_parse_model)
+    return content
+
+
+async def parse_consumption_text(transcript: str) -> tuple[ParsedInventory, str]:
+    """One cloud request: foods plus estimated kcal per 100 g/ml."""
+    settings = get_settings()
+    content = await _openai_chat(CONSUMPTION_SYSTEM_PROMPT, transcript)
+    return parsed_from_model_content(content, consumption=True), settings.openai_parse_model
+
+
+async def parse_inventory_text_openai(transcript: str) -> ParsedInventory:
+    """Cloud chat parser via OpenAI-compatible API (same JSON as local)."""
+    content = await _openai_chat(SYSTEM_PROMPT, transcript)
+    return parsed_from_model_content(content)

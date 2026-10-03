@@ -523,21 +523,35 @@ def _wrap_pre(text: str) -> str:
     return f"```\n{text}\n```"
 
 
+def portion_kcal(quantity: Decimal, unit: str, per_100: Decimal | None) -> Decimal | None:
+    if per_100 is None:
+        return None
+    if unit in {"г", "мл"}:
+        return (quantity * per_100 / Decimal(100)).quantize(Decimal("1"))
+    return per_100.quantize(Decimal("1"))
+
+
 def _append_consumption_table(lines: list[str], rows: list[EntryRow], *, with_date: bool) -> None:
     table = PrettyTable()
     if with_date:
-        table.field_names = ["Дата", "Продукт", "Кол-во", "Ед.", "ккал/100г"]
+        table.field_names = ["Дата", "Продукт", "Кол-во", "Ед.", "ккал"]
         table.align["Дата"] = "l"
     else:
-        table.field_names = ["Продукт", "Кол-во", "Ед.", "ккал/100г"]
+        table.field_names = ["Продукт", "Кол-во", "Ед.", "ккал"]
     table.align["Продукт"] = "l"
     table.align["Кол-во"] = "r"
     table.align["Ед."] = "l"
-    table.align["ккал/100г"] = "r"
+    table.align["ккал"] = "r"
     table.max_width["Продукт"] = 18
+    total = Decimal(0)
+    has_total = False
     for row in rows:
         qty = format(row.quantity.normalize(), "f")
-        kcal = _fmt_kcal(row.kcal_per_100g)
+        portion = portion_kcal(row.quantity, row.unit, row.kcal_per_100g)
+        if portion is not None:
+            total += portion
+            has_total = True
+        kcal = _fmt_kcal(portion)
         if with_date:
             table.add_row(
                 [
@@ -551,6 +565,8 @@ def _append_consumption_table(lines: list[str], rows: list[EntryRow], *, with_da
         else:
             table.add_row([row.product_name, qty, row.unit, kcal])
     lines.append(_wrap_pre(table.get_string()))
+    if has_total:
+        lines.append(f"Итого: {format(total.normalize(), 'f')} ккал")
 
 
 def _append_inventory_table(lines: list[str], rows: list[EntryRow], *, with_date: bool) -> None:

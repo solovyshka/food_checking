@@ -1,4 +1,4 @@
-"""Consumption / calories Telegram bot — «съел» with deferred Qwen parse."""
+"""Consumption / calories Telegram bot — one cloud request estimates kcal."""
 
 from __future__ import annotations
 
@@ -76,11 +76,9 @@ def keyboard() -> ReplyKeyboardMarkup:
 def help_text() -> str:
     return (
         f"Бот *потребления калорий* (*{KIND_LABELS['consumption']}*).\n\n"
-        "Голос или *текст* → подтверждаете распознанный текст.\n"
-        "Тексты копятся по периоду (дата + завтрак/обед/ужин/перекус).\n"
-        f"*{BTN_PARSE_TX}* — Qwen разбирает все тексты выбранного периода.\n\n"
-        f"• *{BTN_LIST_EAT}* — список съеденного\n"
-        f"• *{BTN_PARSE_TX}* — разобрать очередь\n\n"
+        "Голос или *текст* сразу уходит одним запросом в облако.\n"
+        "В ответе порции и оценка съеденных калорий. Кнопка сохраняет в базу.\n\n"
+        f"• *{BTN_LIST_EAT}* — список съеденного\n\n"
         "Наличие продуктов — в отдельном боте."
     )
 
@@ -163,8 +161,15 @@ async def _send_html_report(
 async def _send_pending(
     message: Message, batch: PendingBatch, status_msg: Message | None = None
 ) -> None:
-    report = report_pending_batch(batch)
     markup = _confirm_keyboard(batch.batch_id) if batch.batch_id else None
+    if batch.kind == "consumption":
+        text = format_pending_table(batch)
+        if status_msg is not None:
+            await status_msg.edit_text(text, reply_markup=markup)
+        else:
+            await message.answer(text, reply_markup=markup)
+        return
+    report = report_pending_batch(batch)
     if report:
         caption = (
             f"Режим: {KIND_LABELS[batch.kind]}\n"
@@ -207,9 +212,9 @@ async def _run_parse_period(
 ) -> None:
     label = format_period(entry_date, meal_type)
     if status_msg is None:
-        status_msg = await message.answer(f"Qwen разбирает период {label}...")
+        status_msg = await message.answer(f"Считаю калории за {label}...")
     else:
-        await status_msg.edit_text(f"Qwen разбирает период {label}...")
+        await status_msg.edit_text(f"Считаю калории за {label}...")
     try:
         with SessionLocal() as db:
             batch = await parse_period(db, entry_date, meal_type)
@@ -341,7 +346,7 @@ async def handle_text(message: Message) -> None:
     if not text or text in ALL_BUTTONS:
         return
 
-    status_msg = await message.answer("Сохраняю текст...")
+    status_msg = await message.answer("Считаю калории...")
     try:
         with SessionLocal() as db:
             result = await process_text_message(

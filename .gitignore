@@ -17,3 +17,12 @@ gigaam-src/
 *.ovpn
 .DS_Store
 var/reports/
+
+# Android release artifacts and private signing material
+mobile/android/key.properties
+*.jks
+*.keystore
+outputs/*.apk
+work/
+deploy/out/
+outputs/Установка.md

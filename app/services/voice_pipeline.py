@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy.orm import Session
 
 from app.services.inventory import EntryKind, PendingBatch, create_pending_entries
-from app.services.parser import parse_inventory_text
+from app.services.parser import parse_consumption_text, parse_inventory_text
 from app.services.transcription import transcribe_for_pipeline
 from app.services.transcripts import (
     TranscriptPreview,
@@ -108,10 +108,11 @@ async def process_text_message(
     kind: EntryKind = "consumption",
 ) -> PendingBatch | TranscriptPreview:
     if kind == "consumption":
-        return await process_text_as_transcript(
-            db=db,
-            text=text,
+        return await _parse_consumption_now(
+            db,
+            text.strip(),
             telegram_message_id=telegram_message_id,
+            source="text",
         )
 
     # Inventory text still goes through deferred path via voice-only bot;
@@ -154,7 +155,26 @@ async def process_voice_message(
     telegram_message_id: str | None = None,
     kind: EntryKind = "inventory",
 ) -> PendingBatch | TranscriptPreview:
-    # Both inventory and consumption: STT only, queue for later Qwen.
+    if kind == "consumption":
+        recorded_at = datetime.now(MOSCOW)
+        t0 = time.perf_counter()
+        transcript, backend, stt_detail = await transcribe_for_pipeline(
+            audio_bytes, filename=filename
+        )
+        stt_s = time.perf_counter() - t0
+        batch = await _parse_consumption_now(
+            db,
+            transcript,
+            telegram_message_id=telegram_message_id,
+            source="voice",
+            recorded_at=recorded_at,
+        )
+        stt_extra = f", {stt_detail}" if stt_detail else ""
+        stt_note = f"STT {_fmt_s(stt_s)} ({backend}{stt_extra})"
+        batch.timing_note = (
+            f"{batch.timing_note} · {stt_note}" if batch.timing_note else f"⏱ {stt_note}"
+        )
+        return batch
     return await process_voice_as_transcript(
         db=db,
         audio_bytes=audio_bytes,
@@ -162,3 +182,29 @@ async def process_voice_message(
         telegram_message_id=telegram_message_id,
         kind=kind,
     )
+
+
+async def _parse_consumption_now(
+    db: Session,
+    transcript: str,
+    telegram_message_id: str | None,
+    source: str,
+    recorded_at: datetime | None = None,
+) -> PendingBatch:
+    recorded_at = recorded_at or datetime.now(MOSCOW)
+    t0 = time.perf_counter()
+    parsed, model = await parse_consumption_text(transcript)
+    parse_s = time.perf_counter() - t0
+    t1 = time.perf_counter()
+    batch = create_pending_entries(
+        db=db,
+        parsed=parsed,
+        transcript=transcript,
+        kind="consumption",
+        recorded_at=recorded_at,
+        telegram_message_id=telegram_message_id,
+        source=source,
+    )
+    db_s = time.perf_counter() - t1
+    batch.timing_note = f"⏱ {model} {_fmt_s(parse_s)} · БД {_fmt_s(db_s)}"
+    return batch

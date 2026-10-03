@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Еда — дневник питания — скачать</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: system-ui, sans-serif;
+      background: #eef6f1;
+      color: #143028;
+    }
+    main {
+      width: min(28rem, calc(100% - 2rem));
+      padding: 1.5rem;
+      background: #fff;
+      border-radius: 16px;
+      box-shadow: 0 8px 32px rgba(20, 48, 40, 0.08);
+    }
+    h1 { font-size: 1.4rem; margin: 0 0 0.5rem; }
+    p { line-height: 1.45; color: #3a544b; }
+    a.btn {
+      display: block;
+      margin-top: 1.25rem;
+      padding: 0.9rem 1rem;
+      text-align: center;
+      text-decoration: none;
+      color: #fff;
+      background: #1f4b3a;
+      border-radius: 999px;
+      font-weight: 600;
+    }
+    small { display: block; margin-top: 1rem; color: #6a7f76; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Еда — дневник питания</h1>
+    <p>Говорите или пишите, что съели. Проверяйте продукты и сохраняйте калории в личный дневник. Для подключения нужен ваш код доступа.</p>
+    <a class="btn" href="update.bin" id="download" download="food_consumption.apk">Скачать приложение</a>
+    <p>Android 8.0 и новее. После установки откройте настройки и введите код подключения. Сервер уже указан в приложении.</p>
+    <small id="hint">После загрузки Android спросит разрешение на установку из браузера. Если связь оборвётся — нажмите ещё раз, файл качается кусками.</small>
+  </main>
+  <script>
+    const url = "update.bin";
+    const https = location.protocol === "https:";
+    const chunk = https ? 4 * 1024 * 1024 : 16 * 1024;
+    const btn = document.getElementById("download");
+    const hint = document.getElementById("hint");
+    btn.addEventListener("click", async (event) => {
+      event.preventDefault();
+      if (btn.getAttribute("aria-disabled") === "true") return;
+      btn.setAttribute("aria-disabled", "true");
+      try {
+        const head = await fetch(url, { method: "HEAD", cache: "no-store" });
+        if (!head.ok) throw new Error("Файл недоступен");
+        const total = Number(head.headers.get("content-length") || 0);
+        if (!total) throw new Error("Неизвестный размер файла");
+        const parts = [];
+        let received = 0;
+        while (total === 0 || received < total) {
+          const end = total ? Math.min(received + chunk, total) - 1 : received + chunk - 1;
+          const buf = await getRange(received, end);
+          if (!buf.byteLength) break;
+          parts.push(buf);
+          received += buf.byteLength;
+          hint.textContent = total
+            ? "Скачано " + (received / 1048576).toFixed(1) + " из " + (total / 1048576).toFixed(1) + " МБ"
+            : "Скачано " + (received / 1048576).toFixed(1) + " МБ";
+          if (!total && buf.byteLength < chunk) break;
+        }
+        const blob = new Blob(parts, { type: "application/vnd.android.package-archive" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "food_consumption.apk";
+        a.click();
+        hint.textContent = "Файл сохранён. Откройте его и разрешите установку.";
+      } catch (error) {
+        hint.textContent = "Не вышло скачать. Откройте страницу ещё раз или включите VPN.";
+      } finally {
+        btn.removeAttribute("aria-disabled");
+      }
+    });
+    async function getRange(start, end) {
+      let last = null;
+      for (let i = 0; i < 8; i++) {
+        try {
+          const ctrl = new AbortController();
+          const timer = setTimeout(function () { ctrl.abort(); }, 25000);
+          try {
+            const response = await fetch(url, {
+              headers: { Range: "bytes=" + start + "-" + end },
+              cache: "no-store",
+              signal: ctrl.signal,
+            });
+            if (!response.ok && response.status !== 206) {
+              throw new Error("HTTP " + response.status);
+            }
+            if (response.status !== 206) throw new Error("Сервер не поддержал частичную загрузку");
+            const contentRange = response.headers.get("content-range") || "";
+            if (!contentRange.startsWith("bytes " + start + "-")) throw new Error("Неверный диапазон загрузки");
+            const buffer = await response.arrayBuffer();
+            if (buffer.byteLength !== end - start + 1) throw new Error("Неполная часть файла");
+            return buffer;
+          } finally {
+            clearTimeout(timer);
+          }
+        } catch (error) {
+          last = error;
+          await new Promise((resolve) => setTimeout(resolve, 600 * (i + 1)));
+        }
+      }
+      throw last || new Error("download failed");
+    }
+  </script>
+</body>
+</html>
