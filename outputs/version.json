@@ -1,8 +1,8 @@
 {
-  "versionCode": 3,
-  "versionName": "1.0.2",
-  "sizeBytes": 53193298,
-  "sha256": "dc806009828e96656d877a999c0c2973b32606647b710df66b6531dcdb8fedd6",
-  "apkPath": "/app/releases/3-dc806009828e9665/update.bin",
-  "apkUrl": "https://food-consumption.solovyshka.com/app/releases/3-dc806009828e9665/update.bin"
+  "versionCode": 5,
+  "versionName": "1.0.4",
+  "sizeBytes": 53881950,
+  "sha256": "6e4daae0b43e35775549efd6e7920093c0d566edba0417973e1580621daab092",
+  "apkPath": "/app/releases/5-6e4daae0b43e3577/update.bin",
+  "apkUrl": "https://food-consumption.solovyshka.com/app/releases/5-6e4daae0b43e3577/update.bin"
 }

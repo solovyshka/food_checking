@@ -1,0 +1,20 @@
+[Unit]
+Description=Temporary food photos for Grok on OVH
+After=network.target
+
+[Service]
+User=food-media
+Group=food-media
+EnvironmentFile=/etc/food-checking-media.env
+ExecStart=/usr/bin/python3 /opt/food-checking-media/server.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/food-checking-media
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

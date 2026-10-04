@@ -5,6 +5,10 @@ import android.content.Intent
 import android.net.Uri
 import android.content.pm.PackageManager
 import android.media.MediaRecorder
+import android.media.ExifInterface
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.os.Build
 import android.provider.Settings
 import android.content.pm.PackageInfo
@@ -27,6 +31,7 @@ class MainActivity : FlutterActivity() {
     private var recorder: MediaRecorder? = null
     private var recordingFile: File? = null
     private var permissionResult: MethodChannel.Result? = null
+    private var imageResult: MethodChannel.Result? = null
     private var verifiedUpdate: String? = null
     private val keyAlias = "food-diary-local-v1"
 
@@ -89,6 +94,34 @@ class MainActivity : FlutterActivity() {
                             val value = call.argument<String>("value")!!
                             if (!getSharedPreferences("diary", MODE_PRIVATE).edit().putString(key, encrypt(value)).commit()) {
                                 throw IllegalStateException("Не удалось сохранить данные телефона")
+                            }
+                            result.success(null)
+                        }
+                        "pickImage" -> {
+                            if (imageResult != null || recorder != null) {
+                                result.error("busy", "Дождитесь завершения текущего действия", null)
+                            } else {
+                                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+                                    .addCategory(Intent.CATEGORY_OPENABLE)
+                                    .setType("image/*")
+                                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                imageResult = result
+                                try {
+                                    startActivityForResult(intent, 42)
+                                } catch (e: Exception) {
+                                    imageResult = null
+                                    result.error("image", "Не удалось открыть выбор картинки", null)
+                                }
+                            }
+                        }
+                        "deleteImage" -> {
+                            val file = File(call.argument<String>("path")!!).canonicalFile
+                            val directory = File(filesDir, "draft-images").canonicalFile
+                            if (file.parentFile != directory || !file.name.endsWith(".jpg")) {
+                                throw IllegalArgumentException("Неверный файл картинки")
+                            }
+                            if (file.exists() && !file.delete()) {
+                                throw IllegalStateException("Не удалось удалить картинку")
                             }
                             result.success(null)
                         }
@@ -220,6 +253,97 @@ class MainActivity : FlutterActivity() {
         recorder = null
         recordingFile?.delete()
         recordingFile = null
+    }
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != 42) return
+        val result = imageResult ?: return
+        val uri = data?.data
+        if (resultCode != RESULT_OK || uri == null) {
+            imageResult = null
+            result.success(null)
+            return
+        }
+        Thread {
+            try {
+                val file = importImage(uri)
+                runOnUiThread { imageResult = null; result.success(file.absolutePath) }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    imageResult = null
+                    result.error("image", e.message ?: "Не удалось открыть картинку", null)
+                }
+            }
+        }.start()
+    }
+    private fun importImage(uri: Uri): File {
+        val source = File.createTempFile("food-image-source-", ".tmp", cacheDir)
+        var output: File? = null
+        var bitmap: Bitmap? = null
+        try {
+            contentResolver.openInputStream(uri)?.use { input ->
+                source.outputStream().use { destination ->
+                    val buffer = ByteArray(64 * 1024)
+                    var total = 0L
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        total += count
+                        if (total > 20L * 1024 * 1024) {
+                            throw IllegalArgumentException("Выберите картинку размером до 20 МБ")
+                        }
+                        destination.write(buffer, 0, count)
+                    }
+                }
+            } ?: throw IllegalArgumentException("Не удалось прочитать картинку")
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(source.absolutePath, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0 ||
+                bounds.outWidth > 32768 || bounds.outHeight > 32768 ||
+                bounds.outWidth.toLong() * bounds.outHeight > 200_000_000) {
+                throw IllegalArgumentException("Не удалось открыть картинку. Выберите другое изображение")
+            }
+            var sample = 1
+            while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 1600) sample *= 2
+            val decoded = BitmapFactory.decodeFile(source.absolutePath,
+                BitmapFactory.Options().apply { inSampleSize = sample })
+                ?: throw IllegalArgumentException("Формат картинки не поддерживается")
+            bitmap = decoded
+            val orientation = try {
+                ExifInterface(source.absolutePath).getAttributeInt(ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL)
+            } catch (_: Exception) { ExifInterface.ORIENTATION_NORMAL }
+            val matrix = Matrix()
+            when (orientation) {
+                ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.setScale(-1f, 1f)
+                ExifInterface.ORIENTATION_ROTATE_180 -> matrix.setRotate(180f)
+                ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.setScale(1f, -1f)
+                ExifInterface.ORIENTATION_TRANSPOSE -> { matrix.setRotate(90f); matrix.postScale(-1f, 1f) }
+                ExifInterface.ORIENTATION_ROTATE_90 -> matrix.setRotate(90f)
+                ExifInterface.ORIENTATION_TRANSVERSE -> { matrix.setRotate(270f); matrix.postScale(-1f, 1f) }
+                ExifInterface.ORIENTATION_ROTATE_270 -> matrix.setRotate(270f)
+            }
+            if (!matrix.isIdentity) {
+                bitmap = Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+                if (bitmap !== decoded) decoded.recycle()
+            }
+            val directory = File(filesDir, "draft-images").apply { mkdirs() }
+            val destination = File.createTempFile("food-image-", ".jpg", directory)
+            output = destination
+            // A private JPEG copy keeps the draft independent of gallery access and strips EXIF metadata.
+            destination.outputStream().use {
+                if (!bitmap!!.compress(Bitmap.CompressFormat.JPEG, 85, it)) {
+                    throw IllegalStateException("Не удалось сохранить картинку")
+                }
+            }
+            return destination
+        } catch (e: Exception) {
+            output?.delete()
+            throw e
+        } finally {
+            bitmap?.recycle()
+            source.delete()
+        }
     }
     override fun onPause() { cancelRecording(); super.onPause() }
     override fun onDestroy() { cancelRecording(); super.onDestroy() }

@@ -1,0 +1,10 @@
+[Unit]
+Description=Clean temporary food photos every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
