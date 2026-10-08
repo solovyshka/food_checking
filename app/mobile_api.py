@@ -1,9 +1,8 @@
-"""Authenticated single-owner API for the Android diary, separate from bot API."""
+"""Authenticated per-user API for the Android diary, separate from bot API."""
 import hashlib
 import json
 import logging
 import os
-import secrets
 import time
 from collections import deque
 from datetime import date, datetime, timedelta
@@ -12,7 +11,7 @@ from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile, Response
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -21,35 +20,27 @@ from starlette.concurrency import run_in_threadpool
 from app.config import get_settings
 from app.db.models import ConsumptionEntry, ConsumptionTranscript, Product
 from app.db.mobile_models import (MobileEntryDetails, MobileSubmission, MobileImage, MobileTranscriptDetails,
-                                  MobileParseJob, MobileParsedFood, MobileParsedNutrition)
-from app.db.session import get_db
+                                  MobileParseJob, MobileParsedFood, MobileParsedNutrition, MobileDailyEnergy, MobileEnergyProfile, MobilePerson)
 from app.services.grok_bot import (GrokCallFailed, GrokNotConfigured, GrokDispatchUnknown,
                                    send_test, send_analysis, check_analysis_config)
 from app.services.grok_analysis import (AnalysisResult, apply_result, authorize_job, digest_json, expire_job,
     fail_job, job_input, normalized_image, now_utc, serialized_job, serialized_rows, webhook_payload)
 from app.services.food_images import publish_image
+from app.services.nutrients import MacroValues, MACRO_FIELDS, serialized_macros, daily_macros, update_macros
 from app.services.inventory import normalize_name
 from app.services.mobile_parser import parse_consumption_text
 from app.services.transcription import transcribe_for_pipeline
+from app.services.barcodes import normalize_barcode
+from app.services.energy import daily_energy, profile_on, profile_today, serialize_profile, person_values
+from app.mobile_accounts import authorize, account_by_code, mobile_db, account_id
+from app.mobile_barcodes import register_routes
+from app.mobile_library import LibraryReference, register_routes as register_library_routes
 
 log = logging.getLogger(__name__)
 app = FastAPI(title="Food mobile", docs_url=None, redoc_url=None, openapi_url=None)
 Meal = Literal["breakfast", "lunch", "dinner", "snack"]
 NutritionSource = Literal["estimate", "label", "manual"]
 attempts: deque[float] = deque()
-
-
-def token() -> str:
-    value = os.environ.get("FOOD_MOBILE_TOKEN", "")
-    if len(value) < 32:
-        raise HTTPException(503, "Подключение приложения пока не настроено")
-    return value
-
-
-def authorize(authorization: Annotated[str | None, Header()] = None):
-    expected = "Bearer " + token()
-    if not secrets.compare_digest((authorization or "").encode(), expected.encode()):
-        raise HTTPException(401, "Откройте настройки и подключитесь к коробке")
 
 
 class Pair(BaseModel):
@@ -65,13 +56,11 @@ def pair(body: Pair):
     if len(attempts) >= 5:
         raise HTTPException(429, "Слишком много попыток. Подождите минуту")
     attempts.append(now)
-    configured = os.environ.get("FOOD_MOBILE_PAIR_CODE", "")
-    if not configured or not secrets.compare_digest(body.code.encode(), configured.encode()):
-        raise HTTPException(401, "Неверный код подключения")
-    return {"token": token()}
+    account = account_by_code(body.code)
+    return {"token": account.token, "user": {"id":account.id,"name":account.name}}
 
 
-Db = Annotated[Session, Depends(get_db)]
+Db = Annotated[Session, Depends(mobile_db)]
 Auth = Depends(authorize)
 
 
@@ -80,12 +69,19 @@ def health():
     return {"status": "ok", "version": "1.0.0"}
 
 
-class Item(BaseModel):
+class Item(MacroValues):
     name: str = Field(min_length=1, max_length=255)
     quantity: Decimal = Field(gt=0, le=100000, max_digits=9, decimal_places=3)
     unit: Literal["г", "мл"]
     kcal_per_100g: Decimal | None = Field(default=None, ge=0, le=2000, max_digits=6, decimal_places=2)
     nutrition_source: NutritionSource = "estimate"
+    barcode: str | None = None
+    library_ref: LibraryReference | None = None
+
+    @field_validator("barcode")
+    @classmethod
+    def factory_barcode(cls, value):
+        return normalize_barcode(value) if value is not None else None
 
     @field_validator("name")
     @classmethod
@@ -308,7 +304,7 @@ async def start_analysis(body: StartAnalysis, db: Db):
         .where(MobileTranscriptDetails.transcript_id.in_(body.entry_ids))).all())
     inputs = [{"transcript_id": row.id, "entry_date": row.entry_date.isoformat(),
                "meal": row.meal_type, "text": row.text, "image_id": photos.get(row.id)} for row in rows]
-    job = MobileParseJob(id=job_id, request_hash=digest, nonce=str(uuid4()), status="dispatching", inputs=inputs,
+    job = MobileParseJob(id=job_id, owner_id=account_id(db), request_hash=digest, nonce=str(uuid4()), status="dispatching", inputs=inputs,
         expires_at=now_utc() + timedelta(hours=1))
     try:
         db.add(job)
@@ -405,7 +401,10 @@ def serialize(entry: ConsumptionEntry, details: MobileEntryDetails | None):
     return {"id": entry.id, "name": entry.product.name, "quantity": str(entry.quantity),
             "unit": entry.unit, "kcal_per_100g": str(entry.kcal_per_100g) if entry.kcal_per_100g is not None else None,
             "kcal": str(kcal) if kcal is not None else None, "meal": details.meal if details else "snack",
-            "nutrition_source": details.nutrition_source if details else "unknown"}
+            "nutrition_source": details.nutrition_source if details else "unknown",
+            "barcode": details.barcode if details else None,
+            "library_ref": details.library_ref if details else None,
+            **serialized_macros(details, entry.quantity if entry.unit in ("г", "мл") else None)}
 
 
 @app.get("/api/mobile/diary", dependencies=[Auth])
@@ -421,9 +420,124 @@ def diary(entry_date: date, db: Db):
     queued_count = db.scalar(select(func.count()).select_from(ConsumptionTranscript)
         .where(ConsumptionTranscript.source == "mobile", ConsumptionTranscript.status == "queued",
                ConsumptionTranscript.entry_date == entry_date))
+    missing = sum(i["kcal"] is None for i in items) + sum(i["kcal"] is None for i in tables["nutrition"])
+    energy = db.get(MobileDailyEnergy, entry_date)
+    estimated = any(row["kcal_per_100g"] is not None and
+        (row.get("nutrition_source") == "estimate" or row.get("portion_is_estimate")) for row in items + tables["nutrition"])
     return {"entry_date": entry_date.isoformat(), "items": items, "total_kcal": str(total),
-            "missing_kcal": sum(i["kcal"] is None for i in items) + sum(i["kcal"] is None for i in tables["nutrition"]),
-            "queued_count": queued_count, **tables}
+            "user": {"id":account_id(db),"name":person_values(db)["name"]},
+            "missing_kcal": missing,
+            **daily_energy(db, entry_date, energy, total, estimated, missing or queued_count),
+            "queued_count": queued_count, **tables, **daily_macros(items + tables["nutrition"])}
+
+
+class DailyEnergyWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    spent_kcal: Decimal | None = Field(ge=0, le=100000, max_digits=9, decimal_places=2)
+
+
+@app.put("/api/mobile/days/{entry_date}/energy", dependencies=[Auth])
+def save_daily_energy(entry_date: date, body: DailyEnergyWrite, db: Db):
+    def apply():
+        energy = db.get(MobileDailyEnergy, entry_date, with_for_update=True)
+        if body.spent_kcal is None:
+            if energy is not None:
+                db.delete(energy)
+        else:
+            if energy is None:
+                energy = MobileDailyEnergy(entry_date=entry_date)
+                db.add(energy)
+            energy.spent_kcal, energy.source, energy.training_kcal = body.spent_kcal, "manual", None
+        db.commit()
+    try:
+        apply()
+    except IntegrityError:
+        db.rollback()
+        # Two creates for the same date become an update of the single daily value.
+        try:
+            apply()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(409, "Расход обновлялся одновременно. Повторите сохранение") from None
+    return {"entry_date": entry_date.isoformat(), "spent_kcal": str(body.spent_kcal) if body.spent_kcal is not None else None}
+
+
+class EnergyProfileWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    weight_kg: Decimal = Field(ge=20, le=400, max_digits=5, decimal_places=2)
+    height_cm: Decimal = Field(ge=100, le=250, max_digits=5, decimal_places=2)
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    birth_date: date | None = None
+    sex: Literal["male", "female"] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def clean_person_name(cls, value):
+        if value is not None and not value.strip():
+            raise ValueError("Укажите имя")
+        return value.strip() if value else value
+
+
+@app.get("/api/mobile/energy/profile", dependencies=[Auth])
+def energy_profile(db: Db):
+    today = profile_today()
+    return serialize_profile(profile_on(db, today), today, person_values(db))
+
+
+@app.put("/api/mobile/energy/profile", dependencies=[Auth])
+def save_energy_profile(body: EnergyProfileWrite, db: Db):
+    today = profile_today()
+    values = person_values(db)
+    values.update({key:getattr(body,key) for key in ("name","birth_date","sex") if key in body.model_fields_set})
+    if not values["name"] or values["sex"] not in ("male","female") or values["birth_date"] is None:
+        raise HTTPException(422, "Укажите имя, дату рождения и пол")
+    if not date(1900,1,1) <= values["birth_date"] <= today:
+        raise HTTPException(422, "Проверьте дату рождения")
+    for attempt in range(2):
+        row = db.get(MobileEnergyProfile, today, with_for_update=True)
+        if row is None:
+            row = MobileEnergyProfile(effective_date=today)
+            db.add(row)
+        row.weight_kg, row.height_cm = body.weight_kg, body.height_cm
+        person = db.get(MobilePerson, 1, with_for_update=True)
+        if person is None:
+            person = MobilePerson(id=1)
+            db.add(person)
+        person.name, person.birth_date, person.sex = values["name"], values["birth_date"], values["sex"]
+        try:
+            db.commit()
+            return serialize_profile(row, today, person_values(db))
+        except IntegrityError:
+            db.rollback()
+            if attempt:
+                raise HTTPException(409, "Вес обновлялся одновременно. Повторите сохранение") from None
+
+
+class TrainingEnergyWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    training_kcal: Decimal | None = Field(ge=0, le=100000, max_digits=9, decimal_places=2)
+
+
+@app.put("/api/mobile/days/{entry_date}/activity", dependencies=[Auth])
+def save_training_energy(entry_date: date, body: TrainingEnergyWrite, db: Db):
+    for attempt in range(2):
+        row = db.get(MobileDailyEnergy, entry_date, with_for_update=True)
+        if body.training_kcal is None:
+            if row is not None:
+                db.delete(row)
+        else:
+            if row is None:
+                row = MobileDailyEnergy(entry_date=entry_date)
+                db.add(row)
+            row.source, row.spent_kcal, row.training_kcal = "training", None, body.training_kcal
+        try:
+            db.commit()
+            return {"entry_date": entry_date.isoformat(), "training_kcal":
+                str(body.training_kcal) if body.training_kcal is not None else None}
+        except IntegrityError:
+            db.rollback()
+            if attempt:
+                raise HTTPException(409, "Тренировки обновлялись одновременно. Повторите сохранение") from None
 
 
 def product_for(db, item):
@@ -440,11 +554,26 @@ def product_for(db, item):
 def save(body: Save, db: Db):
     request_id = str(body.request_id)
     digest = hashlib.sha256(json.dumps(body.model_dump(mode="json"), sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    compatible_digests = {digest}
+    payload = body.model_dump(mode="json")
+    if all("library_ref" not in item.model_fields_set for item in body.items):
+        for item in payload["items"]:
+            item.pop("library_ref")
+        compatible_digests.add(hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest())
+    if all("barcode" not in item.model_fields_set for item in body.items):
+        for item in payload["items"]:
+            item.pop("barcode")
+        compatible_digests.add(hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest())
+    if all(not (set(MACRO_FIELDS) | {"macros_source"}) & item.model_fields_set for item in body.items):
+        for item in payload["items"]:
+            for field in (*MACRO_FIELDS, "macros_source"):
+                item.pop(field)
+        compatible_digests.add(hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest())
 
     def previous():
         prior = db.get(MobileSubmission, request_id)
         if prior:
-            if prior.payload_hash != digest:
+            if prior.payload_hash not in compatible_digests:
                 raise HTTPException(409, "Этот запрос уже сохранён с другими данными")
             return prior.response
         return None
@@ -462,7 +591,10 @@ def save(body: Save, db: Db):
             db.add(entry)
             db.flush()
             ids.append(entry.id)
-            db.add(MobileEntryDetails(entry_id=entry.id, meal=body.meal, nutrition_source=item.nutrition_source))
+            db.add(MobileEntryDetails(entry_id=entry.id, meal=body.meal, nutrition_source=item.nutrition_source,
+                barcode=item.barcode,
+                library_ref=item.library_ref.model_dump(mode="json") if item.library_ref else None,
+                **{field: getattr(item, field) for field in MACRO_FIELDS}, macros_source=item.macros_source))
         result = {"ids": ids}
         db.add(MobileSubmission(id=request_id, payload_hash=digest, response=result))
         db.commit()
@@ -488,12 +620,24 @@ def active_entry(db, entry_id):
 @app.patch("/api/mobile/entries/{entry_id}", dependencies=[Auth])
 def edit(entry_id: int, body: Edit, db: Db):
     entry = active_entry(db, entry_id)
+    same_product = normalize_name(entry.product.name) == normalize_name(body.name) and entry.unit == body.unit
+    details = db.get(MobileEntryDetails, entry_id)
+    changed = entry.kcal_per_100g != body.kcal_per_100g or any(
+        field in body.model_fields_set and getattr(details, field, None) != getattr(body, field) for field in MACRO_FIELDS)
     entry.product_id = product_for(db, body).id
     entry.quantity, entry.unit, entry.kcal_per_100g = body.quantity, body.unit, body.kcal_per_100g
-    details = db.get(MobileEntryDetails, entry_id)
     if details is None:
         details = MobileEntryDetails(entry_id=entry_id)
         db.add(details)
+    update_macros(details, body, same_product=same_product)
+    if "library_ref" in body.model_fields_set:
+        details.library_ref = body.library_ref.model_dump(mode="json") if body.library_ref else None
+    elif not same_product or changed:
+        details.library_ref = None
+    if "barcode" in body.model_fields_set:
+        details.barcode = body.barcode
+    elif not same_product:
+        details.barcode = None
     details.meal, details.nutrition_source = body.meal, body.nutrition_source
     db.commit()
     return {"status": "ok"}
@@ -519,6 +663,8 @@ def active_food(db, food_id):
 def edit_food(food_id: int, body: Item, db: Db):
     food = active_food(db, food_id)
     nutrition = db.get(MobileParsedNutrition, food_id)
+    same_product = normalize_name(food.name) == normalize_name(body.name) and nutrition.unit == body.unit
+    update_macros(nutrition, body, same_product=same_product)
     food.name, food.amount, food.unit = body.name, body.quantity, body.unit
     food.amount_is_estimate = body.nutrition_source == "estimate"
     nutrition.quantity, nutrition.unit = body.quantity, body.unit
@@ -534,3 +680,7 @@ def delete_food(food_id: int, db: Db):
     active_food(db, food_id).active = False
     db.commit()
     return {"status": "ok"}
+
+
+register_routes(app, authorize, Db)
+register_library_routes(app)

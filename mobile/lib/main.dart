@@ -4,10 +4,15 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'updater.dart';
+
+part 'barcodes.dart';
+part 'daily_energy.dart';
+part 'food_library.dart';
 
 const device = MethodChannel('ru.solovyshka.food_checking/device');
 const green = Color(0xFF234F42);
@@ -78,6 +83,18 @@ class FoodApp extends StatelessWidget {
 const publicApiBase = 'https://food-consumption.solovyshka.com';
 const publicApiFallback = 'https://vladislavsolovei.ru/food-consumption';
 
+bool isPublicDoor(String address) =>
+    address == publicApiBase || address == publicApiFallback;
+
+enum ServerChoice { automatic, russian, french, custom }
+
+String serverLabel(ServerChoice choice) => switch (choice) {
+  ServerChoice.automatic => 'Автоматически',
+  ServerChoice.russian => 'Русский сервер',
+  ServerChoice.french => 'Французский сервер (OVH)',
+  ServerChoice.custom => 'Другой адрес',
+};
+
 class _DoorUnavailable implements Exception {
   const _DoorUnavailable(this.message);
   final String message;
@@ -88,12 +105,40 @@ class _DoorUnavailable implements Exception {
 class Api {
   String url = publicApiBase;
   String token = '';
+  bool automaticFailover = true;
   String? _activeDoor;
   bool get connected => token.isNotEmpty;
   String get activeUrl => _activeDoor ?? url;
-  void configure(String address, {String? activeDoor}) {
+  ServerChoice get serverChoice => !isPublicDoor(url)
+      ? ServerChoice.custom
+      : automaticFailover
+      ? ServerChoice.automatic
+      : url == publicApiFallback
+      ? ServerChoice.russian
+      : ServerChoice.french;
+  List<String> get requestDoors => automaticFailover && isPublicDoor(url)
+      ? <String>{
+          if (_activeDoor != null) _activeDoor!,
+          url,
+          publicApiBase,
+          publicApiFallback,
+        }.toList()
+      : [url];
+  void configure(
+    String address, {
+    String? activeDoor,
+    bool automaticFailover = true,
+  }) {
     url = address;
-    _activeDoor = activeDoor;
+    this.automaticFailover = automaticFailover;
+    _activeDoor =
+        activeDoor == address ||
+            (automaticFailover &&
+                isPublicDoor(address) &&
+                activeDoor != null &&
+                isPublicDoor(activeDoor))
+        ? activeDoor
+        : null;
   }
 
   Future<Map<String, dynamic>> request(
@@ -104,14 +149,8 @@ class Api {
     String? image,
     bool public = false,
   }) async {
-    final shared = url == publicApiBase || url == publicApiFallback;
-    // Tokens only reach the configured server or the two explicitly trusted doors.
-    final doors = <String>{
-      if (_activeDoor != null) _activeDoor!,
-      url,
-      if (shared) publicApiBase,
-      if (shared) publicApiFallback,
-    };
+    // Explicit server choices never silently switch to another door.
+    final doors = requestDoors;
     Object? last;
     for (final door in doors) {
       try {
@@ -248,6 +287,7 @@ class _DiaryPageState extends State<DiaryPage> {
         final address = data['url'] ?? api.url;
         api.configure(
           address == 'http://192.168.100.41:8092' ? publicApiBase : address,
+          automaticFailover: data['automatic_failover'] as bool? ?? true,
         );
         api.token = data['token'] ?? '';
         draft = data['draft'] as Map<String, dynamic>?;
@@ -262,7 +302,12 @@ class _DiaryPageState extends State<DiaryPage> {
   Future<void> persist() async {
     await device.invokeMethod('store', {
       'key': 'state',
-      'value': jsonEncode({'url': api.url, 'token': api.token, 'draft': draft}),
+      'value': jsonEncode({
+        'url': api.url,
+        'token': api.token,
+        'draft': draft,
+        'automatic_failover': api.automaticFailover,
+      }),
     });
   }
 
@@ -313,24 +358,91 @@ class _DiaryPageState extends State<DiaryPage> {
   Future<void> settings() async {
     final url = TextEditingController(text: api.url);
     final code = TextEditingController();
+    var choice = api.serverChoice;
+    bool canReuseToken(String address) =>
+        api.connected &&
+        (address == api.url ||
+            (isPublicDoor(address) && isPublicDoor(api.url)));
     bool busy = false;
     String? problem;
     await showDialog<void>(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, change) => AlertDialog(
-          title: const Text('Подключение к коробке'),
+          title: const Text('Настройки'),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'Приложение подключается через интернет. Введите свой код доступа; адрес сервера уже настроен.',
+                if (api.connected) ...[
+                  OutlinedButton.icon(
+                    onPressed: busy
+                        ? null
+                        : () async {
+                            final saved = await energyProfileDialog(
+                              context,
+                              api,
+                            );
+                            if (saved == true && mounted) await refresh();
+                          },
+                    icon: const Icon(Icons.monitor_weight_outlined),
+                    label: const Text('Вес и расход в покое'),
+                  ),
+                  const SizedBox(height: 18),
+                ],
+                Text(
+                  api.connected
+                      ? 'Выберите, через какой сервер подключаться к коробке.'
+                      : 'Выберите сервер и введите свой код доступа.',
                 ),
                 const SizedBox(height: 18),
+                DropdownButtonFormField<ServerChoice>(
+                  initialValue: choice,
+                  isExpanded: true,
+                  decoration: const InputDecoration(labelText: 'Сервер'),
+                  items: ServerChoice.values
+                      .map(
+                        (value) => DropdownMenuItem(
+                          value: value,
+                          child: Text(
+                            serverLabel(value),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 14),
+                          ),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: busy
+                      ? null
+                      : (value) {
+                          if (value == null) return;
+                          change(() {
+                            choice = value;
+                            problem = null;
+                            if (value != ServerChoice.custom) {
+                              url.text = value == ServerChoice.russian
+                                  ? publicApiFallback
+                                  : publicApiBase;
+                            }
+                          });
+                        },
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  choice == ServerChoice.automatic
+                      ? 'Приложение выберет доступный сервер.'
+                      : choice == ServerChoice.custom
+                      ? 'Укажите адрес своего сервера.'
+                      : 'Данные будут загружаться только через выбранный сервер.',
+                  style: const TextStyle(color: Colors.black54, fontSize: 12),
+                ),
+                const SizedBox(height: 12),
                 TextField(
                   controller: url,
+                  readOnly: choice != ServerChoice.custom,
+                  onChanged: (_) => change(() => problem = null),
                   enabled: !busy,
                   keyboardType: TextInputType.url,
                   decoration: const InputDecoration(labelText: 'Адрес сервера'),
@@ -341,8 +453,11 @@ class _DiaryPageState extends State<DiaryPage> {
                   enabled: !busy,
                   keyboardType: TextInputType.number,
                   obscureText: true,
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                     labelText: 'Код подключения',
+                    helperText: canReuseToken(url.text)
+                        ? 'Можно не вводить повторно'
+                        : null,
                   ),
                 ),
                 if (problem != null)
@@ -394,19 +509,52 @@ class _DiaryPageState extends State<DiaryPage> {
                         busy = true;
                         problem = null;
                       });
-                      final candidate = Api()..url = address;
-                      try {
-                        final value = await candidate.request(
-                          'POST',
-                          '/pair',
-                          body: {'code': code.text.trim()},
+                      final candidate = Api()
+                        ..configure(
+                          address,
+                          automaticFailover: choice == ServerChoice.automatic,
                         );
-                        api.configure(address, activeDoor: candidate.activeUrl);
-                        api.token = value['token'];
+                      final oldUrl = api.url;
+                      final oldToken = api.token;
+                      final oldDoor = api.activeUrl;
+                      final oldFailover = api.automaticFailover;
+                      final oldDraft = draft;
+                      try {
+                        if (code.text.trim().isEmpty &&
+                            canReuseToken(address)) {
+                          candidate.token = api.token;
+                        } else {
+                          final value = await candidate.request(
+                            'POST',
+                            '/pair',
+                            body: {'code': code.text.trim()},
+                          );
+                          candidate.token = value['token'];
+                        }
+                        api.configure(
+                          address,
+                          activeDoor: candidate.activeUrl,
+                          automaticFailover: candidate.automaticFailover,
+                        );
+                        if (oldToken.isNotEmpty &&
+                            oldToken != candidate.token &&
+                            draft != null) {
+                          throw Exception(
+                            'Сначала сохраните или очистите черновик перед сменой пользователя',
+                          );
+                        }
+                        api.token = candidate.token;
                         await persist();
                         if (ctx.mounted) Navigator.pop(ctx);
                         await refresh();
                       } catch (e) {
+                        api.configure(
+                          oldUrl,
+                          activeDoor: oldDoor,
+                          automaticFailover: oldFailover,
+                        );
+                        api.token = oldToken;
+                        draft = oldDraft;
                         if (ctx.mounted) {
                           change(() {
                             busy = false;
@@ -415,7 +563,13 @@ class _DiaryPageState extends State<DiaryPage> {
                         }
                       }
                     },
-              child: Text(busy ? 'Подключаем…' : 'Подключить'),
+              child: Text(
+                busy
+                    ? 'Сохраняем…'
+                    : api.connected
+                    ? 'Сохранить'
+                    : 'Подключить',
+              ),
             ),
           ],
         ),
@@ -427,7 +581,7 @@ class _DiaryPageState extends State<DiaryPage> {
   Future<void> checkUpdates({bool silent = false}) async {
     try {
       final info = await device.invokeMapMethod<String, dynamic>('appInfo');
-      final localCode = info?['versionCode'] as int? ?? 5;
+      final localCode = info?['versionCode'] as int? ?? 18;
       final remote = await api.request(
         'GET',
         '/app/version.json',
@@ -525,6 +679,17 @@ class _DiaryPageState extends State<DiaryPage> {
     }
   }
 
+  Future<void> editEnergy() async {
+    final date = dayKey(day);
+    final saved = await dailyEnergyDialog(
+      context,
+      api,
+      date,
+      diary?['training_kcal'],
+    );
+    if (saved == true && mounted) await refresh();
+  }
+
   void moveDay(int offset) {
     setState(() => day = day.add(Duration(days: offset)));
     refresh();
@@ -570,11 +735,19 @@ class _DiaryPageState extends State<DiaryPage> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 8, 20, 120),
           children: [
+            if (diary?['user']?['name'] != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: Text(
+                  'Дневник: ${diary!['user']['name']}',
+                  style: const TextStyle(color: Colors.black54),
+                ),
+              ),
             if (update != null)
               UpdateBanner(
                 key: ValueKey(update!.sha256),
                 release: update!,
-                doors: [publicApiFallback, publicApiBase],
+                doors: api.requestDoors,
               ),
             Row(
               children: [
@@ -638,11 +811,17 @@ class _DiaryPageState extends State<DiaryPage> {
                       letterSpacing: -1,
                     ),
                   ),
+                  const SizedBox(height: 12),
+                  DailyMacros(diary: diary),
+                  if (api.connected) ...[
+                    const SizedBox(height: 16),
+                    DailyEnergy(diary: diary),
+                  ],
                   const SizedBox(height: 10),
                   Text(
                     diary == null
                         ? 'Ваш дневник питания'
-                        : '${items.length + foods.length} записей · ${items.where((i) => i['nutrition_source'] == 'estimate').length + nutrition.where((i) => i['nutrition_source'] == 'estimate' || i['portion_is_estimate'] == true).length} с оценкой',
+                        : '${items.length + foods.length} записей',
                     style: const TextStyle(color: Color(0xFFCEE0D6)),
                   ),
                   if ((diary?['missing_kcal'] ?? 0) > 0)
@@ -653,6 +832,18 @@ class _DiaryPageState extends State<DiaryPage> {
                 ],
               ),
             ),
+            if (api.connected) ...[
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: loading || error != null ? null : editEnergy,
+                icon: const Icon(Icons.local_fire_department_outlined),
+                label: Text(
+                  diary?['training_kcal'] == null
+                      ? 'Ввести калории от тренировок'
+                      : 'Изменить калории от тренировок',
+                ),
+              ),
+            ],
             const SizedBox(height: 26),
             if (api.connected)
               Padding(
@@ -699,125 +890,19 @@ class _DiaryPageState extends State<DiaryPage> {
                 add,
                 'Добавить еду',
               ),
-            if (!loading && error == null && foods.isNotEmpty)
+            if (!loading &&
+                error == null &&
+                (items.isNotEmpty || nutrition.isNotEmpty))
               AnalysisTables(
-                foods: foods,
-                nutrition: nutrition,
-                onEdit: (food) {
-                  final n = nutrition.firstWhere(
-                    (n) => n['food_id'] == food['id'],
-                  );
-                  edit({
-                    'id': food['id'],
-                    'grok': true,
-                    'name': food['name'],
-                    'quantity': n['quantity'],
-                    'unit': n['unit'],
-                    'kcal_per_100g': n['kcal_per_100g'],
-                    'nutrition_source': n['nutrition_source'],
-                  });
-                },
-                onDelete: (food) => remove({...food, 'grok': true}),
+                nutrition: [
+                  ...nutrition.map(
+                    (row) => {...row, 'id': row['food_id'], 'grok': true},
+                  ),
+                  ...items,
+                ],
+                onEdit: edit,
+                onDelete: remove,
               ),
-            if (!loading && error == null)
-              ...meals.entries.map((meal) {
-                final rows = items.where((i) => i['meal'] == meal.key).toList();
-                if (rows.isEmpty) return const SizedBox.shrink();
-                final total = rows.fold<double>(
-                  0,
-                  (s, i) => s + (double.tryParse('${i['kcal']}') ?? 0),
-                );
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 10),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              meal.value,
-                              style: const TextStyle(
-                                fontSize: 20,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                          Text(
-                            '${number(total)} ккал',
-                            style: const TextStyle(color: Colors.black54),
-                          ),
-                        ],
-                      ),
-                    ),
-                    ...rows.map(
-                      (i) => Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: Material(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(20),
-                          child: InkWell(
-                            onTap: () => edit(i),
-                            borderRadius: BorderRadius.circular(20),
-                            child: Padding(
-                              padding: const EdgeInsets.fromLTRB(16, 14, 4, 14),
-                              child: Row(
-                                children: [
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          i['name'],
-                                          style: const TextStyle(
-                                            fontWeight: FontWeight.w600,
-                                            fontSize: 16,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 5),
-                                        Text(
-                                          '${number(i['quantity'])} ${i['unit']} · ${sourceLabel(i['nutrition_source'])}',
-                                          style: const TextStyle(
-                                            color: Colors.black54,
-                                            fontSize: 12,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  Text(
-                                    '${i['nutrition_source'] == 'estimate' ? '≈ ' : ''}${number(i['kcal'])}',
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                      fontSize: 18,
-                                    ),
-                                  ),
-                                  PopupMenuButton<String>(
-                                    onSelected: (value) =>
-                                        value == 'edit' ? edit(i) : remove(i),
-                                    itemBuilder: (_) => const [
-                                      PopupMenuItem(
-                                        value: 'edit',
-                                        child: Text('Изменить'),
-                                      ),
-                                      PopupMenuItem(
-                                        value: 'delete',
-                                        child: Text('Удалить'),
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                  ],
-                );
-              }),
             if (draft != null)
               TextButton.icon(
                 onPressed: add,
@@ -911,6 +996,7 @@ class _AddPageState extends State<AddPage> with WidgetsBindingObserver {
   List<Map<String, dynamic>> items = [];
   Map<String, dynamic>? pending;
   Map<String, dynamic>? pendingQueue;
+  Map<String, dynamic>? barcodeDraft;
   bool get locked => pending != null || pendingQueue != null;
   bool busy = false;
   bool recording = false;
@@ -944,6 +1030,7 @@ class _AddPageState extends State<AddPage> with WidgetsBindingObserver {
         .toList();
     pending = draft?['pending'] as Map<String, dynamic>?;
     pendingQueue = draft?['pending_queue'] as Map<String, dynamic>?;
+    barcodeDraft = draft?['barcode_draft'] as Map<String, dynamic>?;
     pendingParse = draft?['pending_parse'] as Map<String, dynamic>?;
     parseNow = draft?['parse_now'] == true;
     imageId = draft?['image_id'] as String?;
@@ -971,6 +1058,7 @@ class _AddPageState extends State<AddPage> with WidgetsBindingObserver {
     'image_id': imageId,
     'pending_parse': pendingParse,
     'parse_now': parseNow,
+    'barcode_draft': barcodeDraft,
   };
 
   Future<bool> keepDraft() async {
@@ -1135,45 +1223,12 @@ class _AddPageState extends State<AddPage> with WidgetsBindingObserver {
 
   Future<void> calculate() => enqueue(analyze: true);
 
-  Future<void> grokTest() async {
-    setState(() {
-      busy = true;
-      error = null;
-      notice = null;
-    });
-    try {
-      final data = await widget.api.request(
-        'POST',
-        '/grok/test',
-        body: {'text': text.text.trim(), 'has_image': imagePath != null},
-      );
-      if (mounted) {
-        setState(
-          () => notice =
-              data['detail'] as String? ??
-              'Grok принял тестовое сообщение. Ответ появится в чате бота.',
-        );
-      }
-    } catch (e) {
-      if (mounted) setState(() => error = errorText(e));
-    } finally {
-      if (mounted) setState(() => busy = false);
-    }
-  }
-
   Future<void> changeItem(int? index) async {
-    final value = await itemDialog(
-      context,
-      index == null
-          ? {
-              'name': '',
-              'quantity': '',
-              'unit': 'г',
-              'kcal_per_100g': '',
-              'nutrition_source': 'manual',
-            }
-          : items[index],
-    );
+    final value = index == null
+        ? await Navigator.of(context).push<Map<String, dynamic>>(
+            MaterialPageRoute(builder: (_) => FoodPickerPage(api: widget.api)),
+          )
+        : await itemDialog(context, items[index]);
     if (value != null && mounted) {
       setState(() {
         if (index == null) {
@@ -1186,7 +1241,37 @@ class _AddPageState extends State<AddPage> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> addBarcode() async {
+    final value = await Navigator.of(context).push<Map<String, dynamic>>(
+      MaterialPageRoute(
+        builder: (_) => BarcodePage(
+          api: widget.api,
+          initial: barcodeDraft,
+          onDraft: (data) async {
+            barcodeDraft = data;
+            if (!await keepDraft()) {
+              throw Exception('Не удалось сохранить черновик');
+            }
+            if (mounted) setState(() {});
+          },
+        ),
+      ),
+    );
+    if (value != null && mounted) {
+      final image = value.remove('label_image_path') as String?;
+      setState(() {
+        items.add(value);
+        barcodeDraft = null;
+      });
+      if (await keepDraft()) await deleteImage(image);
+    }
+  }
+
   Future<void> save() async {
+    if (barcodeDraft != null) {
+      setState(() => error = 'Сначала завершите добавление по штрихкоду');
+      return;
+    }
     if (pendingQueue != null) return;
     if (items.isEmpty && !locked) return;
     for (final i in items) {
@@ -1238,6 +1323,10 @@ class _AddPageState extends State<AddPage> with WidgetsBindingObserver {
   }
 
   Future<void> enqueue({bool analyze = false}) async {
+    if (barcodeDraft != null) {
+      setState(() => error = 'Сначала завершите добавление по штрихкоду');
+      return;
+    }
     if (pending != null) return;
     if (pendingQueue == null &&
         text.text.trim().isEmpty &&
@@ -1394,6 +1483,16 @@ class _AddPageState extends State<AddPage> with WidgetsBindingObserver {
                 imagePath == null ? 'Добавить картинку' : 'Заменить картинку',
               ),
             ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: busy || recording ? null : addBarcode,
+              icon: const Icon(Icons.qr_code_scanner),
+              label: Text(
+                barcodeDraft == null
+                    ? 'Добавить по штрихкоду'
+                    : 'Продолжить добавление по штрихкоду',
+              ),
+            ),
             if (audioPath != null && !busy)
               TextButton(
                 onPressed: () async {
@@ -1424,11 +1523,6 @@ class _AddPageState extends State<AddPage> with WidgetsBindingObserver {
             FilledButton(
               onPressed: busy || recording ? null : calculate,
               child: Text('Разобрать и рассчитать'),
-            ),
-            const SizedBox(height: 8),
-            OutlinedButton(
-              onPressed: busy || recording ? null : grokTest,
-              child: const Text('Тест Grok'),
             ),
           ],
           if (imagePath != null) ...[
@@ -1545,7 +1639,7 @@ class _AddPageState extends State<AddPage> with WidgetsBindingObserver {
             TextButton.icon(
               onPressed: busy || recording ? null : () => changeItem(null),
               icon: const Icon(Icons.add),
-              label: const Text('Добавить продукт вручную'),
+              label: const Text('Добавить продукт'),
             ),
           if ((items.isNotEmpty || pending != null) && pendingQueue == null)
             Padding(
@@ -1581,7 +1675,6 @@ class QueuePage extends StatefulWidget {
 }
 
 class _QueuePageState extends State<QueuePage> {
-  List<Map<String, dynamic>> jobs = [];
   Map<String, dynamic>? pendingAnalysis;
   List<Map<String, dynamic>> items = [];
   bool loading = true;
@@ -1601,8 +1694,12 @@ class _QueuePageState extends State<QueuePage> {
       final result = await widget.api.request('GET', '/queue');
       if (mounted) {
         setState(() {
-          items = (result['items'] as List).cast<Map<String, dynamic>>();
-          jobs = (result['jobs'] as List? ?? []).cast<Map<String, dynamic>>();
+          items = (result['items'] as List)
+              .cast<Map<String, dynamic>>()
+              .where(
+                (item) => ['queued', 'processing'].contains(item['status']),
+              )
+              .toList();
         });
       }
     } catch (e) {
@@ -1686,6 +1783,16 @@ class _QueuePageState extends State<QueuePage> {
     }
   }
 
+  Future<void> openCurrentJob(String jobId) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute<String>(
+        builder: (_) => GrokJobPage(api: widget.api, jobId: jobId),
+      ),
+    );
+    if (mounted) await refresh();
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('Очередь на разбор')),
@@ -1712,24 +1819,6 @@ class _QueuePageState extends State<QueuePage> {
           ),
           if (items.where((i) => i['status'] == 'queued').length > 30)
             const Text('За один раз разбираем первые 30 записей.'),
-          for (final job in jobs)
-            ListTile(
-              title: Text(jobStatus(job['status'])),
-              subtitle: Text(job['error'] ?? 'Открыть результат разбора'),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () =>
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute<String>(
-                      builder: (_) => GrokJobPage(
-                        api: widget.api,
-                        jobId: job['id'] as String,
-                      ),
-                    ),
-                  ).then((_) {
-                    if (mounted) refresh();
-                  }),
-            ),
           if (loading)
             const Center(child: CircularProgressIndicator())
           else if (error != null) ...[
@@ -1764,12 +1853,22 @@ class _QueuePageState extends State<QueuePage> {
                           'Прикреплена картинка',
                           style: TextStyle(color: Colors.black54),
                         ),
-                      if (item['status'] == 'processing')
+                      if (item['status'] == 'processing') ...[
                         const Padding(
                           padding: EdgeInsets.only(top: 8),
                           child: Text('Передано на разбор'),
-                        )
-                      else
+                        ),
+                        if (item['job_id'] is String)
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: TextButton.icon(
+                              onPressed: () =>
+                                  openCurrentJob(item['job_id'] as String),
+                              icon: const Icon(Icons.hourglass_top),
+                              label: const Text('Проверить разбор'),
+                            ),
+                          ),
+                      ] else
                         Align(
                           alignment: Alignment.centerRight,
                           child: TextButton.icon(
@@ -1874,7 +1973,7 @@ class _GrokJobPageState extends State<GrokJobPage> {
           const Center(child: CircularProgressIndicator()),
           const SizedBox(height: 16),
           const Text(
-            'Можно закрыть этот экран. Результат появится в дневнике и в истории разборов.',
+            'Можно закрыть этот экран. Результат появится в дневнике.',
           ),
         ],
         if (error != null)
@@ -1887,7 +1986,6 @@ class _GrokJobPageState extends State<GrokJobPage> {
           ),
         if (job?['status'] == 'completed') ...[
           AnalysisTables(
-            foods: (job!['foods'] as List).cast<Map<String, dynamic>>(),
             nutrition: (job!['nutrition'] as List).cast<Map<String, dynamic>>(),
           ),
           for (final note in job!['skipped'] as List? ?? [])
@@ -1909,34 +2007,77 @@ class _GrokJobPageState extends State<GrokJobPage> {
   );
 }
 
+class DailyMacros extends StatelessWidget {
+  const DailyMacros({super.key, required this.diary});
+  final Map<String, dynamic>? diary;
+
+  @override
+  Widget build(BuildContext context) {
+    const labels = {'protein': 'Белки', 'fat': 'Жиры', 'carbs': 'Углеводы'};
+    final missing = diary?['missing_macros'] as Map? ?? {};
+    final estimated = diary?['estimated_macros'] as Map? ?? {};
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(
+          spacing: 18,
+          runSpacing: 8,
+          children: labels.entries.map((entry) {
+            final value = diary?['total_${entry.key}'];
+            final prefix = value != null && estimated[entry.key] == true
+                ? '≈ '
+                : '';
+            return Text(
+              '${entry.value}: $prefix${number(value)}${value == null ? '' : ' г'}',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 17,
+                fontWeight: FontWeight.w600,
+              ),
+            );
+          }).toList(),
+        ),
+        if (missing.values.any((value) => (value as num) > 0))
+          const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Text(
+              'БЖУ рассчитаны не для всех продуктов',
+              style: TextStyle(color: Color(0xFFCEE0D6), fontSize: 12),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
 class AnalysisTables extends StatelessWidget {
   const AnalysisTables({
     super.key,
-    required this.foods,
     required this.nutrition,
     this.onEdit,
     this.onDelete,
   });
-  final List<Map<String, dynamic>> foods;
   final List<Map<String, dynamic>> nutrition;
   final void Function(Map<String, dynamic>)? onEdit;
   final void Function(Map<String, dynamic>)? onDelete;
-  Widget name(String text) =>
-      SizedBox(width: 155, child: Text(text, softWrap: true));
-  Widget table(List<String> columns, List<DataRow> rows) =>
-      SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: DataTable(
-          columnSpacing: 22,
-          horizontalMargin: 12,
-          dataRowMinHeight: 60,
-          dataRowMaxHeight: 120,
-          columns: columns
-              .map((text) => DataColumn(label: Text(text)))
-              .toList(),
-          rows: rows,
-        ),
-      );
+
+  String macros(Map<String, dynamic> item) {
+    final values = [
+      'protein',
+      'fat',
+      'carbs',
+    ].map((key) => number(item[key])).join('/');
+    final estimated =
+        item['macros_source'] == 'estimate' ||
+        item['portion_is_estimate'] == true;
+    final hasValues = [
+      'protein',
+      'fat',
+      'carbs',
+    ].any((key) => item[key] != null);
+    return '${estimated && hasValues ? '≈ ' : ''}$values';
+  }
+
   @override
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1944,93 +2085,150 @@ class AnalysisTables extends StatelessWidget {
       const SizedBox(height: 16),
       Text('Что съедено', style: Theme.of(context).textTheme.titleLarge),
       const Text(
-        'Таблицы можно прокрутить вправо.',
+        'Б/Ж/У — белки / жиры / углеводы, г на порцию.',
         style: TextStyle(color: Colors.black54, fontSize: 12),
       ),
-      table(
-        ['Продукт', 'Количество', 'Дата · приём пищи', if (onEdit != null) ''],
-        foods
-            .map(
-              (food) => DataRow(
-                cells: [
-                  DataCell(name(food['name'])),
-                  DataCell(
-                    Text(
-                      '${food['amount_is_estimate'] == true ? '≈ ' : ''}${number(food['amount'])} ${food['unit']}',
-                    ),
-                  ),
-                  DataCell(Text('${food['entry_date']}\n${food['meal']}')),
-                  if (onEdit != null)
-                    DataCell(
-                      PopupMenuButton<String>(
-                        onSelected: (value) => value == 'edit'
-                            ? onEdit!(food)
-                            : onDelete?.call(food),
-                        itemBuilder: (_) => const [
-                          PopupMenuItem(value: 'edit', child: Text('Изменить')),
-                          PopupMenuItem(
-                            value: 'delete',
-                            child: Text('Удалить'),
-                          ),
-                        ],
-                      ),
-                    ),
-                ],
-              ),
-            )
-            .toList(),
-      ),
-      const SizedBox(height: 20),
-      Text('Калорийность', style: Theme.of(context).textTheme.titleLarge),
-      table(
-        ['Продукт', 'Порция для расчёта', 'Ккал / 100', 'Ккал', 'Расчёт'],
-        nutrition
-            .map(
-              (item) => DataRow(
-                cells: [
-                  DataCell(name(item['name'])),
-                  DataCell(
-                    Text(
-                      '${item['portion_is_estimate'] == true ? '≈ ' : ''}${number(item['quantity'])} ${item['unit']}',
-                    ),
-                  ),
-                  DataCell(Text(number(item['kcal_per_100g']))),
-                  DataCell(
-                    Text(
-                      '${item['nutrition_source'] == 'estimate' || item['portion_is_estimate'] == true ? '≈ ' : ''}${number(item['kcal'])}',
-                    ),
-                  ),
-                  DataCell(Text(sourceLabel(item['nutrition_source']))),
-                ],
-              ),
-            )
-            .toList(),
-      ),
-      for (final item in nutrition.where(
-        (i) => (i['note'] ?? '').toString().isNotEmpty,
-      ))
-        Padding(
-          padding: const EdgeInsets.only(top: 8),
-          child: Text(
-            '${item['name']}: ${item['note']}',
-            style: const TextStyle(color: Colors.black54, fontSize: 12),
-          ),
-        ),
+      for (var index = 0; index < nutrition.length; index++) ...[
+        if (index > 0) const Divider(height: 1),
+        foodRow(context, nutrition[index]),
+      ],
       const SizedBox(height: 20),
     ],
   );
+
+  Widget foodRow(BuildContext context, Map<String, dynamic> item) {
+    final portionEstimated = item['portion_is_estimate'] == true;
+    final caloriesEstimated = item['nutrition_source'] == 'estimate';
+    final unit = ['г', 'мл'].contains(item['unit']) ? item['unit'] : null;
+    String value(dynamic amount, {bool estimated = false}) =>
+        '${amount != null && estimated ? '≈ ' : ''}${number(amount)}';
+    final metrics = [
+      (
+        label: 'Порция',
+        value: item['quantity'] == null
+            ? '—'
+            : '${value(item['quantity'], estimated: portionEstimated)}${unit == null ? '' : ' $unit'}',
+      ),
+      (
+        label: 'Ккал / 100${unit == null ? '' : ' $unit'}',
+        value: value(item['kcal_per_100g'], estimated: caloriesEstimated),
+      ),
+      (
+        label: 'Ккал итог',
+        value: value(
+          item['kcal'],
+          estimated: caloriesEstimated || portionEstimated,
+        ),
+      ),
+    ];
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: Text(
+                    item['name'],
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+              if (onEdit != null)
+                IconButton(
+                  tooltip: 'Изменить продукт',
+                  icon: const Icon(Icons.edit_outlined),
+                  onPressed: () => onEdit!(item),
+                ),
+              if (onDelete != null)
+                IconButton(
+                  tooltip: 'Удалить продукт',
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: () => onDelete!(item),
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final scale = MediaQuery.textScalerOf(context).scale(16) / 16;
+              final columns = (constraints.maxWidth / (96 * scale))
+                  .floor()
+                  .clamp(1, 3);
+              final width =
+                  (constraints.maxWidth - (columns - 1) * 12) / columns;
+              return Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: metrics.map((metric) {
+                  final align = columns == 3 && metric == metrics.last
+                      ? CrossAxisAlignment.end
+                      : CrossAxisAlignment.start;
+                  return SizedBox(
+                    width: width,
+                    child: Column(
+                      crossAxisAlignment: align,
+                      children: [
+                        Text(
+                          metric.label,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Colors.black54,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          metric.value,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }).toList(),
+              );
+            },
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'Б/Ж/У ${macros(item)} г',
+            style: const TextStyle(fontSize: 14, color: Colors.black54),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 Future<Map<String, dynamic>?> itemDialog(
   BuildContext context,
-  Map<String, dynamic> original,
-) async {
+  Map<String, dynamic> original, {
+  bool barcodeReview = false,
+}) async {
   final form = GlobalKey<FormState>();
   final name = TextEditingController(text: original['name']);
   final quantity = TextEditingController(text: '${original['quantity'] ?? ''}');
   final calories = TextEditingController(
     text: '${original['kcal_per_100g'] ?? ''}',
   );
+  final macros = {
+    for (final field in ['protein_per_100g', 'fat_per_100g', 'carbs_per_100g'])
+      field: TextEditingController(text: '${original[field] ?? ''}'),
+  };
+  const macroLabels = {
+    'protein_per_100g': 'Белки, г',
+    'fat_per_100g': 'Жиры, г',
+    'carbs_per_100g': 'Углеводы, г',
+  };
   final fieldStyle = Theme.of(context).textTheme.bodyLarge!
       .copyWith(fontSize: 16);
   const labelStyle = TextStyle(fontSize: 14);
@@ -2039,6 +2237,7 @@ Future<Map<String, dynamic>?> itemDialog(
       ['estimate', 'label', 'manual'].contains(original['nutrition_source'])
       ? original['nutrition_source']
       : 'manual';
+  bool verified = original['verified'] == true;
   String normalized(String s) => s.trim().replaceAll(',', '.');
   String? numeric(
     String? v, {
@@ -2074,6 +2273,9 @@ Future<Map<String, dynamic>?> itemDialog(
               children: [
                 TextFormField(
                   controller: name,
+                  onChanged: barcodeReview
+                      ? (_) => change(() => verified = false)
+                      : null,
                   style: fieldStyle,
                   maxLength: 255,
                   decoration: const InputDecoration(
@@ -2115,7 +2317,10 @@ Future<Map<String, dynamic>?> itemDialog(
                         ),
                       )
                       .toList(),
-                  onChanged: (v) => change(() => unit = v!),
+                  onChanged: (v) => change(() {
+                    unit = v!;
+                    if (barcodeReview) verified = false;
+                  }),
                   decoration: const InputDecoration(
                     labelText: 'Единица',
                     labelStyle: labelStyle,
@@ -2124,6 +2329,9 @@ Future<Map<String, dynamic>?> itemDialog(
                 const SizedBox(height: 10),
                 TextFormField(
                   controller: calories,
+                  onChanged: barcodeReview
+                      ? (_) => change(() => verified = false)
+                      : null,
                   style: fieldStyle,
                   keyboardType: const TextInputType.numberWithOptions(
                     decimal: true,
@@ -2136,28 +2344,65 @@ Future<Map<String, dynamic>?> itemDialog(
                       numeric(v, optional: true, max: 2000, places: 2),
                 ),
                 const SizedBox(height: 10),
-                DropdownButtonFormField<String>(
-                  initialValue: source,
-                  isExpanded: true,
-                  style: fieldStyle.copyWith(
-                    color: Theme.of(ctx).colorScheme.onSurface,
-                  ),
-                  decoration: const InputDecoration(),
-                  items: ['estimate', 'label', 'manual']
-                      .map(
-                        (v) => DropdownMenuItem(
-                          value: v,
-                          child: Text(
-                            sourceLabel(v),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (v) => change(() => source = v!),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('БЖУ на 100 $unit', style: labelStyle),
                 ),
-                if (source == 'label')
+                for (final field in macros.keys) ...[
+                  const SizedBox(height: 10),
+                  TextFormField(
+                    key: ValueKey(field),
+                    controller: macros[field],
+                    onChanged: barcodeReview
+                        ? (_) => change(() => verified = false)
+                        : null,
+                    style: fieldStyle,
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: InputDecoration(
+                      labelText: macroLabels[field],
+                      labelStyle: labelStyle,
+                    ),
+                    validator: (v) =>
+                        numeric(v, optional: true, max: 200, places: 2),
+                  ),
+                ],
+                const SizedBox(height: 10),
+                if (!barcodeReview)
+                  DropdownButtonFormField<String>(
+                    initialValue: source,
+                    isExpanded: true,
+                    style: fieldStyle.copyWith(
+                      color: Theme.of(ctx).colorScheme.onSurface,
+                    ),
+                    decoration: const InputDecoration(),
+                    items: ['estimate', 'label', 'manual']
+                        .map(
+                          (v) => DropdownMenuItem(
+                            value: v,
+                            child: Text(
+                              sourceLabel(v),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (v) => change(() => source = v!),
+                  ),
+                if (barcodeReview)
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: verified,
+                    title: const Text(
+                      'Значения сверены с упаковкой',
+                      style: TextStyle(fontSize: 14),
+                    ),
+                    onChanged: (value) =>
+                        change(() => verified = value ?? false),
+                  ),
+                if (!barcodeReview && source == 'label')
                   const Padding(
                     padding: EdgeInsets.only(top: 12),
                     child: Text(
@@ -2176,7 +2421,9 @@ Future<Map<String, dynamic>?> itemDialog(
           FilledButton(
             onPressed: () {
               if (!form.currentState!.validate()) return;
-              if (source == 'label' && calories.text.trim().isEmpty) {
+              if (!barcodeReview &&
+                  source == 'label' &&
+                  calories.text.trim().isEmpty) {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
                     content: Text('Для этикетки укажите калорийность'),
@@ -2184,12 +2431,49 @@ Future<Map<String, dynamic>?> itemDialog(
                 );
                 return;
               }
+              final macrosChanged = macros.entries.any(
+                (entry) =>
+                    double.tryParse(normalized(entry.value.text)) !=
+                    double.tryParse('${original[entry.key] ?? ''}'),
+              );
               Navigator.pop(ctx, {
                 'name': name.text.trim(),
                 'quantity': normalized(quantity.text),
                 'unit': unit,
-                'kcal_per_100g': normalized(calories.text),
-                'nutrition_source': source,
+                'kcal_per_100g': calories.text.trim().isEmpty
+                    ? null
+                    : normalized(calories.text),
+                'nutrition_source': barcodeReview
+                    ? (verified ? 'label' : 'estimate')
+                    : source,
+                if (barcodeReview) 'barcode_verified': verified,
+                if (original.containsKey('barcode'))
+                  'barcode':
+                      barcodeReview ||
+                          (name.text.trim() == original['name'] &&
+                              unit == original['unit'])
+                      ? original['barcode']
+                      : null,
+                if (original.containsKey('library_ref'))
+                  'library_ref':
+                      name.text.trim() == original['name'] &&
+                          unit == original['unit'] &&
+                          !macrosChanged &&
+                          double.tryParse(normalized(calories.text)) ==
+                              double.tryParse(
+                                '${original['kcal_per_100g'] ?? ''}',
+                              )
+                      ? original['library_ref']
+                      : null,
+                for (final entry in macros.entries)
+                  entry.key: entry.value.text.trim().isEmpty
+                      ? null
+                      : normalized(entry.value.text),
+                'macros_source': barcodeReview
+                    ? (verified ? 'label' : 'estimate')
+                    : macrosChanged
+                    ? source
+                    : original['macros_source'] ?? source,
               });
             },
             child: const Text('Готово'),

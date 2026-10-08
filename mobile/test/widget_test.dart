@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:food_checking_mobile/main.dart';
 
+import 'fake_network.dart';
+
 class PreviewApi extends Api {
   final requests = <Map<String, dynamic>>[];
   @override
@@ -165,12 +167,154 @@ void main() {
       await tester.pumpAndSettle();
       expect(result, isNull);
       await tester.enterText(find.byType(TextFormField).at(1), '200,5');
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('protein_per_100g')),
+      );
+      await tester.enterText(
+        find.byKey(const ValueKey('protein_per_100g')),
+        '3,25',
+      );
+      await tester.ensureVisible(find.byKey(const ValueKey('fat_per_100g')));
+      await tester.enterText(find.byKey(const ValueKey('fat_per_100g')), '-1');
+      await tester.tap(find.text('Готово'));
+      await tester.pumpAndSettle();
+      expect(result, isNull);
+      await tester.ensureVisible(find.byKey(const ValueKey('fat_per_100g')));
+      await tester.enterText(find.byKey(const ValueKey('fat_per_100g')), '0');
       await tester.tap(find.text('Готово'));
       await tester.pumpAndSettle();
       expect(result?['quantity'], '200.5');
       expect(result?['nutrition_source'], 'label');
+      expect(result?['protein_per_100g'], '3.25');
+      expect(result?['fat_per_100g'], '0');
+      expect(result?['carbs_per_100g'], isNull);
+      expect(result?['macros_source'], 'label');
     },
   );
+  testWidgets('Manual macros reach the saved draft and entry request', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = PreviewApi();
+    Map<String, dynamic>? stored;
+    await tester.runAsync(() => FoodLibraryRepository(api).load());
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () => Navigator.push<void>(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => AddPage(
+                    api: api,
+                    date: '2026-10-05',
+                    onDraft: (draft) async {
+                      stored = draft;
+                    },
+                  ),
+                ),
+              ),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('Добавить продукт'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('Добавить продукт'));
+    await tester.pump();
+    // Assets and platform storage complete outside the test's fake clock.
+    await tester.runAsync(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Вручную'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextFormField).at(0), 'Молоко 2.5%');
+    await tester.enterText(find.byType(TextFormField).at(1), '200');
+    await tester.ensureVisible(find.byType(TextFormField).at(2));
+    await tester.enterText(find.byType(TextFormField).at(2), '52');
+    for (final entry in {
+      'protein_per_100g': '3,2',
+      'fat_per_100g': '2,5',
+      'carbs_per_100g': '4,7',
+    }.entries) {
+      final field = find.byKey(ValueKey(entry.key));
+      await tester.ensureVisible(field);
+      await tester.enterText(field, entry.value);
+    }
+    await tester.tap(find.text('Готово'));
+    await tester.pumpAndSettle();
+    final item = Map<String, dynamic>.from((stored!['items'] as List).single);
+    expect(item['protein_per_100g'], '3.2');
+    expect(item['fat_per_100g'], '2.5');
+    expect(item['carbs_per_100g'], '4.7');
+    expect(item['macros_source'], 'manual');
+    await tester.scrollUntilVisible(
+      find.text('Сохранить в дневник'),
+      200,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('Сохранить в дневник'));
+    await tester.pumpAndSettle();
+    final request = api.requests.singleWhere((r) => r['path'] == '/entries');
+    expect(request['path'], '/entries');
+    expect((request['body']['items'] as List).single, item);
+    expect(stored, isNull);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('Editing only a portion preserves estimated macros', (
+    tester,
+  ) async {
+    Map<String, dynamic>? result;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async {
+                result = await itemDialog(context, {
+                  'name': 'Котлета',
+                  'quantity': '100',
+                  'unit': 'г',
+                  'kcal_per_100g': '280',
+                  'nutrition_source': 'label',
+                  'protein_per_100g': '15.00',
+                  'fat_per_100g': '20.00',
+                  'carbs_per_100g': '10.00',
+                  'macros_source': 'estimate',
+                });
+              },
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextFormField).at(1), '200');
+    await tester.tap(find.text('Готово'));
+    await tester.pumpAndSettle();
+    expect(result?['quantity'], '200');
+    expect(result?['protein_per_100g'], '15.00');
+    expect(result?['fat_per_100g'], '20.00');
+    expect(result?['carbs_per_100g'], '10.00');
+    expect(result?['macros_source'], 'estimate');
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('Draft is restored with retry payload unchanged', (tester) async {
     Map<String, dynamic>? stored;
     final body = {
@@ -380,37 +524,31 @@ void main() {
       expect(stored, isNull);
       expect(find.text('Разбор сохранён в дневнике'), findsOneWidget);
       expect(find.text('Что съедено'), findsOneWidget);
-      expect(find.text('Калорийность'), findsOneWidget);
+      expect(find.text('Калорийность'), findsNothing);
       expect(tester.takeException(), isNull);
     },
   );
 
-  testWidgets('Both result tables fit a narrow phone at large text size', (
+  testWidgets('Food rows fit large text without horizontal scrolling', (
     tester,
   ) async {
-    tester.view.physicalSize = const Size(360, 800);
+    tester.view.physicalSize = const Size(320, 1000);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
+    Map<String, dynamic>? edited;
+    Map<String, dynamic>? deleted;
     await tester.pumpWidget(
       MaterialApp(
         home: MediaQuery(
           data: const MediaQueryData(textScaler: TextScaler.linear(2)),
           child: Scaffold(
             body: ListView(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
               children: [
                 AnalysisTables(
-                  foods: const [
-                    {
-                      'id': 1,
-                      'name': 'Котлета по-киевски с гарниром',
-                      'amount': '2',
-                      'unit': 'шт',
-                      'entry_date': '2026-10-03',
-                      'meal': 'обед',
-                      'amount_is_estimate': false,
-                    },
-                  ],
+                  onEdit: (item) => edited = item,
+                  onDelete: (item) => deleted = item,
                   nutrition: const [
                     {
                       'food_id': 1,
@@ -419,6 +557,10 @@ void main() {
                       'unit': 'г',
                       'kcal_per_100g': '280',
                       'kcal': '840',
+                      'protein': '30',
+                      'fat': '60',
+                      'carbs': null,
+                      'macros_source': 'estimate',
                       'portion_is_estimate': true,
                       'nutrition_source': 'estimate',
                       'note': 'Масса порции оценена приблизительно',
@@ -433,11 +575,51 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Что съедено'), findsOneWidget);
-    expect(find.text('Калорийность'), findsOneWidget);
+    expect(find.text('Калорийность'), findsNothing);
+    expect(find.byType(DataTable), findsNothing);
+    expect(
+      tester
+          .widgetList<Scrollable>(find.byType(Scrollable))
+          .every(
+            (scrollable) => scrollable.axisDirection == AxisDirection.down,
+          ),
+      true,
+    );
+    expect(find.text('Котлета по-киевски с гарниром'), findsOneWidget);
+    expect(find.text('Порция'), findsOneWidget);
+    expect(find.text('≈ 300 г'), findsOneWidget);
+    expect(find.text('Ккал / 100 г'), findsOneWidget);
+    expect(find.text('≈ 280'), findsOneWidget);
+    expect(find.text('Ккал итог'), findsOneWidget);
+    expect(find.text('≈ 840'), findsOneWidget);
+    expect(find.text('Б/Ж/У ≈ 30/60/— г'), findsOneWidget);
+    expect(find.text('Расчёт'), findsNothing);
+    expect(find.text('Дата · приём пищи'), findsNothing);
+    expect(find.textContaining('Масса порции оценена'), findsNothing);
+    final product = tester.getRect(find.text('Котлета по-киевски с гарниром'));
+    final edit = tester.getRect(find.byTooltip('Изменить продукт'));
+    final remove = tester.getRect(find.byTooltip('Удалить продукт'));
+    expect(product.right, lessThanOrEqualTo(edit.left));
+    expect(edit.right, lessThanOrEqualTo(remove.left));
+    for (final text in [
+      'Котлета по-киевски с гарниром',
+      '≈ 300 г',
+      '≈ 280',
+      '≈ 840',
+      'Б/Ж/У ≈ 30/60/— г',
+    ]) {
+      final bounds = tester.getRect(find.text(text));
+      expect(bounds.left, greaterThanOrEqualTo(20));
+      expect(bounds.right, lessThanOrEqualTo(300));
+    }
+    await tester.tap(find.byTooltip('Изменить продукт'));
+    await tester.tap(find.byTooltip('Удалить продукт'));
+    expect(edited?['food_id'], 1);
+    expect(deleted?['food_id'], 1);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('Grok test sends the draft text and does not calculate', (
+  testWidgets('Add page has queue and analysis buttons without Grok test', (
     tester,
   ) async {
     final api = PreviewApi();
@@ -453,21 +635,263 @@ void main() {
     );
     await tester.pumpAndSettle();
     await tester.scrollUntilVisible(
-      find.text('Тест Grok'),
+      find.text('Разобрать и рассчитать'),
       200,
       scrollable: find.byType(Scrollable).first,
     );
-    await tester.tap(find.text('Тест Grok'));
-    await tester.pumpAndSettle();
-    expect(api.requests.single['path'], '/grok/test');
-    expect(api.requests.single['body'], {
-      'text': 'Молоко 200 г',
-      'has_image': false,
-    });
-    expect(
-      find.text('Grok принял тестовое сообщение. Ответ появится в чате бота.'),
-      findsOneWidget,
-    );
-    expect(tester.takeException(), isNull);
+    expect(find.text('Тест Grok'), findsNothing);
+    expect(find.text('В очередь на разбор'), findsOneWidget);
+    expect(api.requests, isEmpty);
   });
+
+  testWidgets(
+    'Daily macros distinguish estimated, zero and unknown on a narrow screen',
+    (tester) async {
+      tester.view.physicalSize = const Size(360, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: MediaQuery(
+            data: const MediaQueryData(textScaler: TextScaler.linear(2)),
+            child: Scaffold(
+              body: Padding(
+                padding: const EdgeInsets.all(44),
+                child: DailyMacros(
+                  diary: const {
+                    'total_protein': '9.9',
+                    'total_fat': '0.0',
+                    'total_carbs': null,
+                    'estimated_macros': {
+                      'protein': true,
+                      'fat': false,
+                      'carbs': false,
+                    },
+                    'missing_macros': {'protein': 0, 'fat': 0, 'carbs': 1},
+                  },
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Белки: ≈ 9.9 г'), findsOneWidget);
+      expect(find.text('Жиры: 0 г'), findsOneWidget);
+      expect(find.text('Углеводы: —'), findsOneWidget);
+      expect(find.text('БЖУ рассчитаны не для всех продуктов'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+  testWidgets(
+    'Server selection reuses connection and persists after reopening',
+    (tester) async {
+      final network = FakeNetwork();
+      HttpOverrides.global = network;
+      addTearDown(() => HttpOverrides.global = null);
+      var stored = jsonEncode({
+        'url': publicApiBase,
+        'token': 'existing-test-token',
+        'draft': {'text': 'Несохранённая еда'},
+      });
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(device, (call) async {
+            if (call.method == 'load') {
+              return stored;
+            }
+            if (call.method == 'store') {
+              stored = (call.arguments as Map)['value'] as String;
+            }
+            if (call.method == 'appInfo') {
+              return {'versionCode': 9};
+            }
+            return null;
+          });
+      await tester.pumpWidget(const FoodApp());
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Настройки'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(DropdownButtonFormField<ServerChoice>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Русский сервер').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Сохранить'));
+      await tester.pumpAndSettle();
+      final state = jsonDecode(stored) as Map;
+      expect(state['url'], publicApiFallback);
+      expect(state['automatic_failover'], false);
+      expect(state['token'], 'existing-test-token');
+      expect(state['draft'], {'text': 'Несохранённая еда'});
+      expect(
+        network.requests.where((r) => r.uri.path.endsWith('/pair')),
+        isEmpty,
+      );
+      expect(network.requests.last.uri.host, Uri.parse(publicApiFallback).host);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+      network.requests.clear();
+      await tester.pumpWidget(const FoodApp());
+      await tester.pumpAndSettle();
+      expect(
+        network.requests.every(
+          (r) => r.uri.host == Uri.parse(publicApiFallback).host,
+        ),
+        true,
+      );
+      await tester.tap(find.byTooltip('Настройки'));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<DropdownButtonFormField<ServerChoice>>(
+              find.byType(DropdownButtonFormField<ServerChoice>),
+            )
+            .initialValue,
+        ServerChoice.russian,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+  testWidgets(
+    'Re-pairing cannot transfer an unsaved draft into another account',
+    (tester) async {
+      final network = FakeNetwork();
+      HttpOverrides.global = network;
+      addTearDown(() => HttpOverrides.global = null);
+      var stored = jsonEncode({
+        'url': publicApiBase,
+        'token': 'first-user-token',
+        'draft': {'text': 'Еда первого пользователя'},
+      });
+      network.responder = (request) => request.uri.path.endsWith('/pair')
+          ? {'token': 'second-user-token'}
+          : null;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(device, (call) async {
+            if (call.method == 'load') {
+              return stored;
+            }
+            if (call.method == 'store') {
+              stored = (call.arguments as Map)['value'] as String;
+            }
+            return null;
+          });
+      await tester.pumpWidget(const FoodApp());
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Настройки'));
+      await tester.pumpAndSettle();
+      final input = find.byWidgetPredicate(
+        (w) => w is TextField && w.decoration?.labelText == 'Код подключения',
+      );
+      await tester.ensureVisible(input);
+      await tester.enterText(input, '87654321');
+      await tester.tap(find.text('Сохранить'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text(
+          'Сначала сохраните или очистите черновик перед сменой пользователя',
+        ),
+        findsOneWidget,
+      );
+      final state = jsonDecode(stored) as Map;
+      expect(state['token'], 'first-user-token');
+      expect(state['draft'], {'text': 'Еда первого пользователя'});
+      expect(
+        network.requests
+            .where((r) => r.method == 'POST')
+            .every((r) => r.uri.path.endsWith('/pair')),
+        true,
+      );
+      await tester.tap(find.text('Закрыть'));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    },
+  );
+  testWidgets(
+    'Queue hides history while a current job can be checked and disappears after completion',
+    (tester) async {
+      final network = FakeNetwork();
+      HttpOverrides.global = network;
+      addTearDown(() => HttpOverrides.global = null);
+      var finished = false;
+      network.responder = (request) {
+        if (request.uri.path.endsWith('/queue')) {
+          return {
+            'items': [
+              {
+                'id': 1,
+                'entry_date': '2026-10-07',
+                'meal': 'lunch',
+                'text': 'Ждёт разбора',
+                'status': 'queued',
+              },
+              if (!finished)
+                {
+                  'id': 2,
+                  'entry_date': '2026-10-07',
+                  'meal': 'dinner',
+                  'text': 'Сейчас разбирается',
+                  'status': 'processing',
+                  'job_id': 'current-job',
+                },
+              {
+                'id': 3,
+                'entry_date': '2026-10-01',
+                'meal': 'lunch',
+                'text': 'Историческая запись',
+                'status': 'parsed',
+              },
+            ],
+            'jobs': [
+              {'id': 'old-complete', 'status': 'completed'},
+              {
+                'id': 'old-failed',
+                'status': 'failed',
+                'error': 'Старая ошибка',
+              },
+            ],
+          };
+        }
+        if (request.uri.path.endsWith('/queue/jobs/current-job')) {
+          finished = true;
+          return {
+            'id': 'current-job',
+            'status': 'completed',
+            'nutrition': [],
+            'skipped': [],
+          };
+        }
+        return null;
+      };
+      await tester.pumpWidget(
+        MaterialApp(home: QueuePage(api: Api()..token = 'test-token')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Ждёт разбора'), findsOneWidget);
+      expect(find.text('Историческая запись'), findsNothing);
+      expect(find.text('Разбор сохранён в дневнике'), findsNothing);
+      expect(find.text('Не удалось завершить разбор'), findsNothing);
+      expect(find.text('Старая ошибка'), findsNothing);
+      await tester.scrollUntilVisible(
+        find.text('Проверить разбор'),
+        160,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(find.text('Проверить разбор'));
+      await tester.pumpAndSettle();
+      expect(find.byType(GrokJobPage), findsOneWidget);
+      expect(find.text('Разбор сохранён в дневнике'), findsOneWidget);
+      await tester.tap(find.text('Вернуться к дневнику'));
+      await tester.pumpAndSettle();
+      expect(find.text('Ждёт разбора'), findsOneWidget);
+      expect(find.text('Сейчас разбирается'), findsNothing);
+      expect(find.text('Проверить разбор'), findsNothing);
+      expect(find.text('Разбор сохранён в дневнике'), findsNothing);
+      expect(
+        network.requests.where((request) => request.method != 'GET'),
+        isEmpty,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
 }

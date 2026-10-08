@@ -35,7 +35,7 @@ if not properties.exists():
 build_properties = app/'android/key.properties'
 if not build_properties.exists(): build_properties.symlink_to(properties)
 if not args.skip_build:
-    for command in (['pub','get'],['analyze'],['test','test/widget_test.dart','test/updater_test.dart'],['build','apk','--release']):
+    for command in (['pub','get'],['analyze'],['test'],['build','apk','--release']):
         subprocess.run([str(flutter),*command],cwd=app,check=True)
 apk = app/'build/app/outputs/flutter-apk/app-release.apk'
 tools = sorted((sdk/'build-tools').iterdir())[-1]
@@ -54,13 +54,17 @@ out.mkdir(parents=True,exist_ok=True)
 if args.skip_publish:
     print('Built',version,code,apk)
     raise SystemExit(0)
+ssh = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20',
+       '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=2',
+       '-o', 'ControlPath=none']
+rsync = ['rsync', '-az', '--timeout=90', '-e', ' '.join(ssh)]
 for host,remote_home in [('ubuntu@51.254.219.211','/home/ubuntu'),('root@135.106.218.22','/root')]:
     remote_stage = remote_home+'/food-consumption-publish'
-    subprocess.run(['ssh','-o','BatchMode=yes','-o','ConnectTimeout=20',host,'mkdir -p '+remote_stage+'/release'],check=True)
-    subprocess.run(['rsync','-az','-e','ssh -o BatchMode=yes -o ConnectTimeout=20',str(apk),host+':'+remote_stage+'/release/food_consumption.apk'],check=True)
-    subprocess.run(['rsync','-az',str(out/'version.json'),host+':'+remote_stage+'/release/version.json'],check=True)
-    subprocess.run(['rsync','-az',str(root/'deploy/public/index.html'),host+':'+remote_stage+'/release/index.html'],check=True)
-    subprocess.run(['rsync','-az',str(root/'deploy/public/install-release.py'),host+':'+remote_stage+'/install-release.py'],check=True)
-    subprocess.run(['ssh','-o','BatchMode=yes','-o','ConnectTimeout=20',host,
+    subprocess.run([*ssh,host,'mkdir -p '+remote_stage+'/release'],check=True)
+    subprocess.run([*rsync,str(apk),host+':'+remote_stage+'/release/food_consumption.apk'],check=True)
+    subprocess.run([*rsync,str(out/'version.json'),host+':'+remote_stage+'/release/version.json'],check=True)
+    subprocess.run([*rsync,str(root/'deploy/public/index.html'),host+':'+remote_stage+'/release/index.html'],check=True)
+    subprocess.run([*rsync,str(root/'deploy/public/install-release.py'),host+':'+remote_stage+'/install-release.py'],check=True)
+    subprocess.run([*ssh,host,
         'sudo -n python3 '+remote_stage+'/install-release.py '+remote_stage+'/release'],check=True)
 print('Published',version,'to both public doors')

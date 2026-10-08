@@ -17,9 +17,12 @@ import java.security.MessageDigest
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.util.AtomicFile
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import com.google.zxing.integration.android.IntentIntegrator
+import com.google.zxing.oned.UPCEReader
 import java.io.File
 import java.security.KeyStore
 import javax.crypto.Cipher
@@ -32,8 +35,10 @@ class MainActivity : FlutterActivity() {
     private var recordingFile: File? = null
     private var permissionResult: MethodChannel.Result? = null
     private var imageResult: MethodChannel.Result? = null
+    private var barcodeResult: MethodChannel.Result? = null
     private var verifiedUpdate: String? = null
     private val keyAlias = "food-diary-local-v1"
+    private val libraryLock = Any()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -97,8 +102,61 @@ class MainActivity : FlutterActivity() {
                             }
                             result.success(null)
                         }
+                        "loadLibrary", "storeLibrary" -> {
+                            val owner = call.argument<String>("owner")!!
+                            val value = call.argument<String>("value")
+                            val hash = MessageDigest.getInstance("SHA-256")
+                                .digest(owner.toByteArray(Charsets.UTF_8))
+                                .joinToString("") { "%02x".format(it) }
+                            val saving = call.method == "storeLibrary"
+                            Thread {
+                                try {
+                                  synchronized(libraryLock) {
+                                    val directory = File(filesDir, "food-library")
+                                    directory.mkdirs()
+                                    val file = AtomicFile(File(directory, "$hash.bin"))
+                                    if (saving) {
+                                        val stream = file.startWrite()
+                                        try {
+                                            stream.write(encrypt(value!!).toByteArray(Charsets.UTF_8))
+                                            file.finishWrite(stream)
+                                        } catch (e: Exception) {
+                                            file.failWrite(stream)
+                                            throw e
+                                        }
+                                        runOnUiThread { result.success(null) }
+                                    } else {
+                                        val data = if (file.baseFile.exists()) decrypt(String(file.readFully(), Charsets.UTF_8)) else null
+                                        runOnUiThread { result.success(data) }
+                                    }
+                                  }
+                                } catch (e: Exception) {
+                                    runOnUiThread { result.error("library", "Не удалось сохранить или прочитать справочник", null) }
+                                }
+                            }.start()
+                        }
+                        "scanBarcode" -> {
+                            if (barcodeResult != null || imageResult != null || recorder != null || permissionResult != null) {
+                                result.error("busy", "Дождитесь завершения текущего действия", null)
+                            } else {
+                                barcodeResult = result
+                                try {
+                                    IntentIntegrator(this)
+                                        .setCaptureActivity(FoodBarcodeActivity::class.java)
+                                        .setRequestCode(43)
+                                        .setDesiredBarcodeFormats(listOf("EAN_13", "EAN_8", "UPC_A", "UPC_E"))
+                                        .setPrompt("Наведите камеру на штрихкод упаковки")
+                                        .setBeepEnabled(false)
+                                        .setOrientationLocked(true)
+                                        .initiateScan()
+                                } catch (e: Exception) {
+                                    barcodeResult = null
+                                    result.error("camera", "Не удалось открыть сканер. Можно ввести код вручную", null)
+                                }
+                            }
+                        }
                         "pickImage" -> {
-                            if (imageResult != null || recorder != null) {
+                            if (imageResult != null || barcodeResult != null || recorder != null || permissionResult != null) {
                                 result.error("busy", "Дождитесь завершения текущего действия", null)
                             } else {
                                 val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
@@ -126,7 +184,7 @@ class MainActivity : FlutterActivity() {
                             result.success(null)
                         }
                         "startRecording" -> {
-                            if (permissionResult != null || recorder != null) {
+                            if (permissionResult != null || recorder != null || barcodeResult != null || imageResult != null) {
                                 result.error("busy", "Запись уже запущена", null)
                             } else if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                                 permissionResult = result
@@ -193,6 +251,7 @@ class MainActivity : FlutterActivity() {
             throw IllegalArgumentException("Обновление не соответствует установленному приложению")
         }
     }
+    @Synchronized
     private fun key(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         (store.getKey(keyAlias, null) as? SecretKey)?.let { return it }
@@ -256,6 +315,19 @@ class MainActivity : FlutterActivity() {
     }
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 43) {
+            val result = barcodeResult ?: return
+            barcodeResult = null
+            if (data?.getBooleanExtra("MISSING_CAMERA_PERMISSION", false) == true) {
+                result.error("permission", "Разрешите доступ к камере или введите штрихкод вручную", null)
+            } else {
+                val contents = data?.getStringExtra("SCAN_RESULT")
+                val format = data?.getStringExtra("SCAN_RESULT_FORMAT")
+                val code = if (contents != null && format == "UPC_E") UPCEReader.convertUPCEtoUPCA(contents) else contents
+                result.success(if (resultCode == RESULT_OK) code else null)
+            }
+            return
+        }
         if (requestCode != 42) return
         val result = imageResult ?: return
         val uri = data?.data

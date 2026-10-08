@@ -50,6 +50,63 @@ class MobileApiTest(unittest.TestCase):
     def diary(self, day='2026-10-03'):
         return self.client.get('/api/mobile/diary', params={'entry_date':day}, headers=self.headers).json()
 
+    def test_daily_energy_unknown_zero_update_clear_and_date(self):
+        from app.db.mobile_models import MobileDailyEnergy
+        path = '/api/mobile/days/2026-10-03/energy'
+        self.assertIsNone(self.diary()['spent_kcal'])
+        self.assertIsNone(self.diary()['energy_delta'])
+        def put(value):
+            response = self.client.put(path, json={'spent_kcal': value}, headers=self.headers)
+            self.assertEqual(response.status_code, 200, response.text)
+        put('1000.50')
+        put('1000.50')
+        self.assertEqual(self.diary()['energy_delta'], '-1000.5')
+        self.assertIsNone(self.diary('2026-10-02')['spent_kcal'])
+        with self.factory() as db:
+            self.assertEqual(db.scalar(select(func.count()).select_from(MobileDailyEnergy)), 1)
+        body = self.body()
+        entry_id = self.post(body).json()['ids'][0]
+        put('100')
+        self.assertEqual(self.diary()['energy_delta'], '4.0')
+        self.assertFalse(self.diary()['energy_delta_estimated'])
+        self.assertFalse(self.diary()['energy_delta_incomplete'])
+        edit = {**body['items'][0], 'quantity':'100', 'meal':'breakfast'}
+        self.client.patch(f'/api/mobile/entries/{entry_id}', json=edit, headers=self.headers)
+        self.assertEqual(self.diary()['energy_delta'], '-48.0')
+        self.client.delete(f'/api/mobile/entries/{entry_id}', headers=self.headers)
+        self.assertEqual(self.diary()['energy_delta'], '-100.0')
+        put('0')
+        self.assertEqual(self.diary()['spent_kcal'], '0.00')
+        self.assertEqual(self.diary()['energy_delta'], '0.0')
+        put(None)
+        put(None)
+        self.assertIsNone(self.diary()['energy_delta'])
+        with self.factory() as db:
+            self.assertEqual(db.scalar(select(func.count()).select_from(MobileDailyEnergy)), 0)
+            self.assertEqual(db.scalar(select(func.count()).select_from(ConsumptionEntry)), 1)
+
+    def test_daily_energy_auth_validation_estimates_and_incomplete_food(self):
+        path = '/api/mobile/days/2026-10-03/energy'
+        self.assertEqual(self.client.put(path, json={'spent_kcal':'100'}).status_code, 401)
+        for value in ('NaN', 'Infinity', '-1', '100001', '3.141', '', True):
+            self.assertEqual(self.client.put(path, json={'spent_kcal':value}, headers=self.headers).status_code, 422)
+        self.assertEqual(self.client.put(path, json={}, headers=self.headers).status_code, 422)
+        self.assertIsNone(self.diary()['spent_kcal'])
+        self.assertEqual(self.client.put('/api/mobile/days/2026-02-30/energy', json={'spent_kcal':100}, headers=self.headers).status_code, 422)
+        self.client.put(path, json={'spent_kcal':'100'}, headers=self.headers)
+        body = self.body()
+        body['items'][0]['nutrition_source'] = 'estimate'
+        self.post(body)
+        self.assertTrue(self.diary()['energy_delta_estimated'])
+        body['request_id'] = str(uuid4())
+        body['items'][0]['kcal_per_100g'] = None
+        self.post(body)
+        self.assertTrue(self.diary()['energy_delta_incomplete'])
+        self.assertEqual(self.diary()['energy_delta'], '4.0')
+        self.client.post('/api/mobile/queue', json={'request_id':str(uuid4()), 'entry_date':'2026-10-04', 'meal':'lunch', 'text':'Food waiting for parsing'}, headers=self.headers)
+        self.client.put('/api/mobile/days/2026-10-04/energy', json={'spent_kcal':'200'}, headers=self.headers)
+        self.assertTrue(self.diary('2026-10-04')['energy_delta_incomplete'])
+
     def test_auth_pair_rate_limit(self):
         self.assertEqual(self.client.get('/api/mobile/diary?entry_date=2026-10-03').status_code,401)
         result = self.client.post('/api/mobile/pair', json={'code':'12345678'})
